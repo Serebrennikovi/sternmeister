@@ -1,6 +1,6 @@
 # HANDOFF — WhatsApp Auto-notifications (Sternmeister)
 
-**Последнее обновление:** 23.02.2026
+**Последнее обновление:** 24.02.2026
 
 ---
 
@@ -34,12 +34,12 @@
 
 **T02** — Scaffold проекта и базовая инфраструктура
 - **Статус:** ✅ done
-- **Файл:** [T02_s01_scaffold.md](3.%20tasks/S01_whatsapp_auto_notifications/T02_s01_scaffold.md)
+- **Файл:** [T02_s01_scaffold_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T02_s01_scaffold_done.md)
 - **Результат:** FastAPI app, config.py, Dockerfile, .env.example, .gitignore, .dockerignore
 
 **T03** — SQLite модель и логирование
 - **Статус:** ✅ done
-- **Файл:** [T03_s01_sqlite_model.md](3.%20tasks/S01_whatsapp_auto_notifications/T03_s01_sqlite_model.md)
+- **Файл:** [T03_s01_sqlite_model_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T03_s01_sqlite_model_done.md)
 - **Результат:** db.py с init_db(), create_message(), update_message(), get_messages_for_retry(), get_pending_messages()
 
 ### Фаза 2: Core (последовательно T04→T06, затем параллельные ветки)

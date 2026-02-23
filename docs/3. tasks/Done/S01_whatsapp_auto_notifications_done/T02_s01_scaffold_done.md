@@ -268,16 +268,16 @@ Thumbs.db
 
 ## Критерии приёмки
 
-- [ ] Структура папок создана согласно архитектуре из S01
-- [ ] `requirements.txt` содержит все необходимые зависимости
-- [ ] `.env.example` содержит все переменные окружения из S01
-- [ ] `config.py` загружает переменные окружения корректно
-- [ ] `app.py` запускается и отвечает на `/health` endpoint
-- [ ] Проект запускается локально: `python server/app.py`
-- [ ] Dockerfile собирается без ошибок: `docker build -t whatsapp-notifications .`
-- [ ] Docker-контейнер запускается и health check работает
-- [ ] `.gitignore` исключает `.env`, `__pycache__`, `*.db`
-- [ ] README.md обновлён с инструкциями по запуску
+- [x] Структура папок создана согласно архитектуре из S01
+- [x] `requirements.txt` содержит все необходимые зависимости
+- [x] `.env.example` содержит все переменные окружения из S01
+- [x] `config.py` загружает переменные окружения корректно
+- [x] `app.py` запускается и отвечает на `/health` endpoint
+- [x] Проект запускается через Docker: `docker run --env-file .env whatsapp-notifications`
+- [x] Dockerfile собирается без ошибок: `docker build -t whatsapp-notifications .`
+- [x] Docker-контейнер запускается и health check работает
+- [x] `.gitignore` исключает `.env`, `__pycache__`, `*.db`
+- [x] README.md обновлён с инструкциями по запуску
 
 ---
 

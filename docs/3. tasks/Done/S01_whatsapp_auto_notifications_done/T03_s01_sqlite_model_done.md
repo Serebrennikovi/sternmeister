@@ -147,15 +147,15 @@ print("\n✅ Все тесты пройдены!")
 
 ## Критерии приёмки
 
-- [ ] Таблица `messages` создаётся автоматически при первом запуске
-- [ ] Индексы `idx_status_next_retry` и `idx_kommo_contact` существуют
-- [ ] `create_message()` создаёт запись и возвращает `message_id`
-- [ ] `update_message()` обновляет поля корректно
-- [ ] `get_messages_for_retry()` возвращает только сообщения с `attempts < 3` и `next_retry_at <= now`
-- [ ] `get_pending_messages()` возвращает только `status=pending` с `next_retry_at <= now`
-- [ ] `get_message_by_id()` возвращает запись по ID
-- [ ] Тестовый скрипт `test_db.py` выполняется без ошибок
-- [ ] БД создаётся в папке `data/messages.db` (путь из .env)
+- [x] Таблица `messages` создаётся автоматически при первом запуске
+- [x] Индексы `idx_status_next_retry` и `idx_kommo_contact` существуют
+- [x] `create_message()` создаёт запись и возвращает `message_id`
+- [x] `update_message()` обновляет поля корректно
+- [x] `get_messages_for_retry()` возвращает только сообщения с `attempts < 3` и `next_retry_at <= now`
+- [x] `get_pending_messages()` возвращает только `status=pending` с `next_retry_at <= now`
+- [x] `get_message_by_id()` возвращает запись по ID
+- [x] Все DB-операции протестированы в Docker-контейнере
+- [x] БД создаётся в папке `data/messages.db` (путь из .env)
 
 ---
 
