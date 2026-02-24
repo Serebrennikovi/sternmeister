@@ -1,13 +1,13 @@
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from server.config import DATABASE_PATH, MAX_RETRY_ATTEMPTS
 
 _ALLOWED_COLUMNS = frozenset({
-    "kommo_contact_id", "kommo_lead_id", "phone", "line", "message_text",
-    "status", "attempts", "sent_at", "next_retry_at", "messenger_id",
-    "messenger_backend",
+    "kommo_contact_id", "kommo_lead_id", "phone", "line", "termin_date",
+    "message_text", "status", "attempts", "sent_at", "next_retry_at",
+    "messenger_id", "messenger_backend",
 })
 
 _CREATE_TABLE = """
@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS messages (
     kommo_contact_id INTEGER NOT NULL,
     phone TEXT NOT NULL,
     line TEXT NOT NULL CHECK(line IN ('first', 'second')),
+    termin_date TEXT NOT NULL,
     message_text TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'sent', 'delivered', 'failed')),
     attempts INTEGER NOT NULL DEFAULT 1,
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS messages (
 _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_status_next_retry ON messages (status, next_retry_at);",
     "CREATE INDEX IF NOT EXISTS idx_kommo_contact ON messages (kommo_contact_id);",
+    "CREATE INDEX IF NOT EXISTS idx_dedup ON messages (kommo_lead_id, line, created_at);",
 ]
 
 
@@ -80,6 +82,7 @@ def create_message(
     kommo_contact_id: int,
     phone: str,
     line: str,
+    termin_date: str,
     message_text: str,
     status: str = "pending",
     attempts: int = 1,
@@ -95,15 +98,16 @@ def create_message(
             """
             INSERT INTO messages
                 (kommo_lead_id, kommo_contact_id, phone, line,
-                 message_text, status, attempts, created_at, sent_at,
-                 next_retry_at, messenger_id, messenger_backend)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 termin_date, message_text, status, attempts, created_at,
+                 sent_at, next_retry_at, messenger_id, messenger_backend)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 kommo_lead_id,
                 kommo_contact_id,
                 phone,
                 line,
+                termin_date,
                 message_text,
                 status,
                 attempts,
@@ -170,11 +174,44 @@ def get_message_by_id(message_id: int) -> sqlite3.Row | None:
         conn.close()
 
 
+def get_recent_message(
+    kommo_lead_id: int,
+    line: str,
+    within_minutes: int,
+) -> sqlite3.Row | None:
+    """Check if a message for this lead+line was created recently.
+
+    Used for webhook deduplication: Kommo may resend the same event.
+    """
+    cutoff = (
+        datetime.now(tz=timezone.utc) - timedelta(minutes=within_minutes)
+    ).isoformat(timespec="seconds")
+    conn = _get_conn()
+    try:
+        return conn.execute(
+            """
+            SELECT * FROM messages
+            WHERE kommo_lead_id = ?
+              AND line = ?
+              AND created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (kommo_lead_id, line, cutoff),
+        ).fetchone()
+    finally:
+        conn.close()
+
+
 def get_messages_for_retry(
     at: str | None = None,
     max_attempts: int = MAX_RETRY_ATTEMPTS + 1,
 ) -> list[sqlite3.Row]:
-    """Get messages eligible for retry: sent, next_retry_at <= now, attempts < max."""
+    """Get messages eligible for retry: sent or failed, next_retry_at <= now, attempts < max.
+
+    Both 'sent' (no reply yet) and 'failed' (delivery error) messages
+    are retried by the T08 cron job.
+    """
     if at is None:
         at = now_iso()
     conn = _get_conn()
@@ -182,7 +219,7 @@ def get_messages_for_retry(
         return conn.execute(
             """
             SELECT * FROM messages
-            WHERE status = 'sent'
+            WHERE status IN ('sent', 'failed')
               AND next_retry_at <= ?
               AND attempts < ?
             ORDER BY next_retry_at ASC

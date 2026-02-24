@@ -24,8 +24,14 @@ WAZZUP_API_URL = os.getenv("WAZZUP_API_URL", "https://api.wazzup24.com/v3")
 WAZZUP_CHANNEL_ID = _require("WAZZUP_CHANNEL_ID")
 WAZZUP_TEMPLATE_ID = _require("WAZZUP_TEMPLATE_ID")
 
-# Kommo webhook validation (optional for now, required for production)
+# Kommo webhook validation (secret-in-URL, Kommo doesn't send HMAC headers)
 KOMMO_WEBHOOK_SECRET = os.getenv("KOMMO_WEBHOOK_SECRET", "")
+if not KOMMO_WEBHOOK_SECRET:
+    print(
+        "WARNING: KOMMO_WEBHOOK_SECRET is not set — "
+        "webhook endpoint is unprotected!",
+        file=sys.stderr,
+    )
 
 # Telegram (optional — alerts won't work without these)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -34,8 +40,16 @@ TELEGRAM_ALERT_CHAT_ID = os.getenv("TELEGRAM_ALERT_CHAT_ID", "")
 # Settings
 SEND_WINDOW_START = int(os.getenv("SEND_WINDOW_START", "9"))
 SEND_WINDOW_END = int(os.getenv("SEND_WINDOW_END", "21"))
+if not (0 <= SEND_WINDOW_START < SEND_WINDOW_END <= 24):
+    print(
+        f"FATAL: invalid send window: SEND_WINDOW_START={SEND_WINDOW_START}, "
+        f"SEND_WINDOW_END={SEND_WINDOW_END} (need 0 <= START < END <= 24)",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 MAX_RETRY_ATTEMPTS = int(os.getenv("MAX_RETRY_ATTEMPTS", "2"))
-RETRY_INTERVAL_HOURS = int(os.getenv("RETRY_INTERVAL_HOURS", "24"))
+RETRY_INTERVAL_HOURS = float(os.getenv("RETRY_INTERVAL_HOURS", "24"))
+DEDUP_WINDOW_MINUTES = int(os.getenv("DEDUP_WINDOW_MINUTES", "10"))
 
 # Database
 DATABASE_PATH = os.getenv("DATABASE_PATH", "./data/messages.db")

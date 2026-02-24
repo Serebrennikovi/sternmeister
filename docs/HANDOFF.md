@@ -6,7 +6,7 @@
 
 ## Текущий статус
 
-Проект в стадии **активной разработки**. Foundation завершён (T01-T03), Kommo API клиент (T04) и Wazzup messenger (T05) реализованы, переходим к webhook handler (T06).
+Проект в стадии **активной разработки**. Foundation (T01-T03), Core (T04-T07), Cron (T08) и Telegram алерты (T09) завершены. Полный цикл: webhook → Kommo API → проверка окна 9-21 → Wazzup24 → SQLite + cron retry/pending + Telegram алерты при ошибках. Переходим к T10 (деплой на Hetzner).
 
 ---
 
@@ -23,7 +23,7 @@
 ## Задачи S01
 
 **Всего задач:** 10 (T01-T11, без пропусков)
-**Текущая задача:** T06 — Webhook handler для Kommo
+**Текущая задача:** T10 — Деплой на Hetzner
 
 ### Фаза 1: Foundation (последовательно)
 
@@ -55,38 +55,34 @@
 - **Результат:** messenger/wazzup.py — WazzupMessenger с send_message(), build_message_text(), MessageData, MessengerError; retry 429/5xx, PII masking, lazy singleton
 
 **T06** — Webhook handler для Kommo
-- **Статус:** draft (следующая)
-- **Файл:** [T06_s01_webhook_handler.md](3.%20tasks/S01_whatsapp_auto_notifications/T06_s01_webhook_handler.md)
-- **Требует:** T03, T04, T05
-- **Инкремент:** POST /webhook/kommo — полный цикл: webhook → Kommo API → Wazzup24 → SQLite
+- **Статус:** ✅ done
+- **Файл:** [T06_s01_webhook_handler_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T06_s01_webhook_handler_done.md)
+- **Результат:** app.py — POST /webhook/kommo: парсинг form-data (PHP bracket notation) и JSON, determine_line, dedup, Kommo API → extract phone/termin → build message → send → add note → SQLite. utils.py — parse_bracket_form(). 61 тест (pytest + freezegun)
+
+**T07** — Логика окна времени и отложенные сообщения
+- **Статус:** ✅ done
+- **Файл:** [T07_s01_send_window_logic_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T07_s01_send_window_logic_done.md)
+- **Результат:** utils.py — is_in_send_window(), get_next_send_window_start() (DST-safe, zoneinfo). Webhook вне 9-21 → status=pending. Валидация SEND_WINDOW_START/END. Тесты CET/CEST/DST transitions
 
 ### Фаза 3: Features (параллельные ветки после T06)
 
-**T07** — Логика окна времени и отложенные сообщения
-- **Статус:** draft
-- **Файл:** [T07_s01_send_window_logic.md](3.%20tasks/S01_whatsapp_auto_notifications/T07_s01_send_window_logic.md)
-- **Требует:** T06
-- **Инкремент:** is_in_send_window(), отложенные сообщения до 9:00
-
 **T08** — Cron-задача для повторов
-- **Статус:** draft
-- **Файл:** [T08_s01_cron_retries.md](3.%20tasks/S01_whatsapp_auto_notifications/T08_s01_cron_retries.md)
-- **Требует:** T06, T07
-- **Инкремент:** Автоматические повторы через 24ч, макс 2 раза
+- **Статус:** ✅ done
+- **Файл:** [T08_s01_cron_retries_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T08_s01_cron_retries_done.md)
+- **Результат:** cron.py — process_retries() (sent/failed, attempts < 3, next_retry_at <= now), process_pending() (отложенные из webhook), Kommo add_note для retry/pending, 24 теста (pytest + freezegun)
 
 **T09** — Telegram алерты
-- **Статус:** draft
-- **Файл:** [T09_s01_telegram_alerts.md](3.%20tasks/S01_whatsapp_auto_notifications/T09_s01_telegram_alerts.md)
-- **Требует:** T06
-- **Инкремент:** Telegram-уведомления при ошибках отправки
+- **Статус:** ✅ done
+- **Файл:** [T09_s01_telegram_alerts_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T09_s01_telegram_alerts_done.md)
+- **Результат:** alerts.py — TelegramAlerter с lazy singleton, send_alert, alert_messenger_error (PII masking), alert_kommo_error, alert_cron_error, alert_unexpected_error, alert_info; Markdown escaping; graceful degradation. Интеграция в app.py и cron.py. 31 тест (pytest + freezegun)
 
 ### Фаза 4: Production
 
 **T10** — Деплой на Hetzner и настройка webhook
-- **Статус:** draft
+- **Статус:** in_progress
 - **Файл:** [T10_s01_deploy.md](3.%20tasks/S01_whatsapp_auto_notifications/T10_s01_deploy.md)
 - **Требует:** T06-T09
-- **Инкремент:** Docker на Hetzner, Nginx + SSL, webhook URL в Kommo
+- **Инкремент:** Docker на Hetzner, ngrok + SSL, webhook URL в Kommo
 
 **T11** — Интеграционное тестирование и доработки
 - **Статус:** draft
@@ -147,6 +143,34 @@
 ---
 
 ## История изменений
+
+### 2026-02-24 — T09 акцептована
+- Telegram алерты (alerts.py): TelegramAlerter с lazy singleton, PII masking, Markdown escaping, graceful degradation
+- Интеграция в app.py: KommoAPIError, MessengerError, no phone/termin warnings, catch-all (alert_unexpected_error)
+- Интеграция в cron.py: retry/pending individual failure alerts, fatal error alert
+- Фиксы по ревью: Markdown injection в catch-all (send_alert → alert_unexpected_error), _escape_md в alert_info, доп. интеграционные тесты для cron
+- 31 тест: unit (_mask_phone, _escape_md, send_alert, все helper-методы) + integration (webhook/cron alert calls)
+
+### 2026-02-24 — T08 акцептована
+- Cron-задача (cron.py): process_retries() для sent/failed сообщений, process_pending() для отложенных
+- Kommo add_note при успешной retry/pending отправке (не было в исходной реализации — добавлено по ревью)
+- Фиксы по ревью: `except Exception as exc` (exc не был привязан), обновлена документация (устаревший псевдокод, green_api→wazzup, scope, ExecStart)
+- 24 теста (pytest + freezegun): retry lifecycle, pending lifecycle, Kommo note, error handling
+
+### 2026-02-24 — Ревью и фиксы T06
+- `attempts=0` для pending-сообщений (не отправленных — готовит для T08 cron)
+- Консистентный формат ответа: всегда `{"status":"ok","results":[...]}` (убрана развилка single/multiple)
+- TypeError добавлен в except-clause парсера form-data (защита от inconsistent nesting)
+- `json.loads(body)` вместо `request.json()` (убрано двойное чтение body)
+- Новые тесты: termin_date fallback по 3 полям (4 теста), batch mixed results (2 теста), malformed form/JSON body (2 теста)
+- Документация: acceptance criteria отмечены [x], termin_date добавлен в architecture.md, 61 тест
+- Обновлены все существующие тесты под новый формат ответа
+
+### 2026-02-24 — T06, T07 акцептованы
+- T06: Webhook handler (app.py) — полный цикл обработки Kommo webhook, form-data парсер, dedup, 61 тест
+- T07: Send window logic (utils.py) — is_in_send_window(), get_next_send_window_start() с DST-safe вычислением (zoneinfo вместо pytz), тесты CET/CEST/DST
+- Фиксы по ревью T07: обновлена документация задачи (зависимости, zoneinfo, убраны ненужные format_* функции), добавлены тесты midnight/early morning, валидация SEND_WINDOW_START/END в config.py, RETRY_INTERVAL_HOURS → float
+- Убран дубликат separator в test_webhook.py
 
 ### 2026-02-24 — T05 акцептована
 - WazzupMessenger (messenger/wazzup.py) реализован и прошёл код-ревью

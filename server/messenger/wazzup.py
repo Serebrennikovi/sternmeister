@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import requests
 
+from server.utils import mask_phone
+
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
@@ -29,13 +31,6 @@ class MessageData:
             raise ValueError(f"Invalid line: {self.line!r}, expected one of {_VALID_LINES}")
         if not self.termin_date:
             raise ValueError("termin_date must not be empty")
-
-
-def _mask_phone(phone: str) -> str:
-    """Mask phone for logging: +491234567890 -> +49***7890."""
-    if len(phone) > 7:
-        return phone[:3] + "***" + phone[-4:]
-    return "***"
 
 
 _TEMPLATE_TEXT = (
@@ -117,7 +112,7 @@ class WazzupMessenger:
             "templateValues": template_values,
         }
 
-        masked = _mask_phone(phone)
+        masked = mask_phone(phone)
         logger.info("Sending WhatsApp to %s via Wazzup24", masked)
 
         resp = self._request_with_retry(url, payload)

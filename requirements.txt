@@ -1,9 +1,12 @@
 # Web framework
-fastapi==0.115.0
+fastapi==0.115.14
 uvicorn[standard]==0.32.0
 
 # HTTP client
 requests==2.32.3
+
+# Form data parsing (Kommo webhooks send x-www-form-urlencoded)
+python-multipart==0.0.22
 
 # Environment variables
 python-dotenv==1.0.1

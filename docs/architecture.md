@@ -98,6 +98,7 @@ class MessageData:
 | kommo_contact_id | INTEGER | ID контакта в Kommo |
 | phone | TEXT | Номер телефона |
 | line | TEXT | "first" / "second" |
+| termin_date | TEXT | Дата термина (DD.MM.YYYY) |
 | message_text | TEXT | Текст отправленного сообщения |
 | status | TEXT | "sent" / "delivered" / "failed" / "pending" |
 | attempts | INTEGER | Количество попыток (макс 3: первая + 2 повтора) |
@@ -210,29 +211,57 @@ Content-Type: application/json
 
 ## Инфраструктура
 
-### Варианты размещения
+### Размещение
 
-| Вариант | Стоимость | Плюсы | Минусы |
-|---------|-----------|-------|--------|
-| Дешёвый VPS (Hetzner/Timeweb) | ~$5/мес | Полный контроль, cron, SSH | Нужно поддерживать |
-| Railway / Render | $0–7/мес | Деплой через Git, без SSH | Ограничения cron |
+Hetzner VPS (65.108.154.202), Ubuntu 24.04, Docker 29.2.1.
+
+HTTPS-доступ через **ngrok tunnel** (статический домен `shternmeister.ngrok.pro`):
+- Порт 443 занят VPN (x-ui) → ngrok решает SSL без конфликта портов
+- Webhook URL: `https://shternmeister.ngrok.pro/webhook/kommo?secret=<KOMMO_WEBHOOK_SECRET>`
 
 ### Деплой
 
 ```
-server/
-├── app.py              # FastAPI, webhook handler
-├── cron.py             # Retry + отложенные сообщения
-├── messenger/
-│   ├── __init__.py     # Экспорт get_messenger, MessageData, MessengerError
-│   └── wazzup.py       # WazzupMessenger (lazy singleton, retry 429/5xx)
-├── kommo.py            # Kommo API клиент
-├── alerts.py           # Telegram-алерты
-├── db.py               # SQLite
-├── config.py           # Переменные окружения
+/app/whatsapp/              # на сервере
+├── server/
+│   ├── app.py              # FastAPI, webhook handler (POST /webhook/kommo)
+│   ├── utils.py            # is_in_send_window(), get_next_send_window_start(), parse_bracket_form()
+│   ├── cron.py             # Retry + отложенные сообщения
+│   ├── messenger/
+│   │   ├── __init__.py     # Экспорт get_messenger, MessageData, MessengerError
+│   │   └── wazzup.py       # WazzupMessenger (lazy singleton, retry 429/5xx)
+│   ├── kommo.py            # Kommo API клиент
+│   ├── alerts.py           # Telegram-алерты
+│   ├── db.py               # SQLite
+│   └── config.py           # Переменные окружения
 ├── requirements.txt
-└── Dockerfile
+├── Dockerfile
+├── .env                    # продакшн-секреты
+└── data/
+    └── messages.db         # SQLite (volume mount)
 ```
+
+### Docker
+
+```bash
+# Build
+docker build -t whatsapp-notifications .
+
+# Run (порт 8000 только на localhost, внешний доступ через ngrok)
+docker run -d --name whatsapp-notifications \
+  --restart unless-stopped \
+  -p 127.0.0.1:8000:8000 \
+  -v /app/whatsapp/data:/app/data \
+  --env-file /app/whatsapp/.env \
+  --log-opt max-size=10m \
+  --log-opt max-file=3 \
+  whatsapp-notifications
+```
+
+### Systemd
+
+- `ngrok-whatsapp.service` — ngrok tunnel (auto-restart)
+- `whatsapp-cron.timer` — cron каждый час (process_retries + process_pending)
 
 ### Переменные окружения
 
@@ -278,12 +307,12 @@ DATABASE_PATH=./data/messages.db
 
 ## Acceptance Criteria / DoD
 
-- [ ] Webhook от Kommo принимается и обрабатывается
-- [ ] Сообщение отправляется в WhatsApp при смене этапа воронки
-- [ ] Персонализация: имя + дата ближайшего свободного окна
-- [ ] Отправка только в окне 9:00–21:00, отложенные уходят утром
-- [ ] Повторная отправка через 24ч, макс 2 раза
-- [ ] Примечание в Kommo: "сообщение отправлено"
-- [ ] Алерт в Telegram при ошибке
-- [ ] Логирование всех событий в SQLite
-- [ ] Messenger layer позволяет добавить дополнительные каналы (выделение интерфейса при необходимости)
+- [x] Webhook от Kommo принимается и обрабатывается
+- [x] Сообщение отправляется в WhatsApp при смене этапа воронки
+- [x] Персонализация: дата термина (имя клиента не используется — ограничение WABA-шаблона)
+- [x] Отправка только в окне 9:00–21:00, отложенные уходят утром
+- [x] Повторная отправка через 24ч, макс 2 раза
+- [x] Примечание в Kommo: "сообщение отправлено"
+- [x] Алерт в Telegram при ошибке
+- [x] Логирование всех событий в SQLite
+- [x] Messenger layer позволяет добавить дополнительные каналы (выделение интерфейса при необходимости)
