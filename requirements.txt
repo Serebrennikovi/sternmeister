@@ -7,6 +7,3 @@ requests==2.32.3
 
 # Environment variables
 python-dotenv==1.0.1
-
-# Datetime / timezone
-python-dateutil==2.9.0

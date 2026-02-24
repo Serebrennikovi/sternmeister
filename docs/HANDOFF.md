@@ -6,7 +6,7 @@
 
 ## Текущий статус
 
-Проект в стадии **активной разработки**. Scaffold и SQLite реализованы (T02, T03), готовимся к следующим задачам.
+Проект в стадии **активной разработки**. Foundation завершён (T01-T03), Kommo API клиент (T04) и Wazzup messenger (T05) реализованы, переходим к webhook handler (T06).
 
 ---
 
@@ -23,7 +23,7 @@
 ## Задачи S01
 
 **Всего задач:** 10 (T01-T11, без пропусков)
-**Текущая задача:** T04 — Kommo API клиент
+**Текущая задача:** T06 — Webhook handler для Kommo
 
 ### Фаза 1: Foundation (последовательно)
 
@@ -45,19 +45,17 @@
 ### Фаза 2: Core (последовательно T04→T06, затем параллельные ветки)
 
 **T04** — Kommo API клиент
-- **Статус:** draft (следующая)
-- **Файл:** [T04_s01_kommo_api_client.md](3.%20tasks/S01_whatsapp_auto_notifications/T04_s01_kommo_api_client.md)
-- **Требует:** T02, T03
-- **Инкремент:** kommo.py с get_lead_with_contacts(), extract_phone(), extract_termin_date(), add_note()
+- **Статус:** ✅ done
+- **Файл:** [T04_s01_kommo_api_client_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T04_s01_kommo_api_client_done.md)
+- **Результат:** kommo.py — KommoClient с get_lead_with_contacts(), get_contact(), extract_phone(), extract_termin_date(), add_note(); retry 429/5xx, lazy init, нормализация телефонов
 
 **T05** — Отправка WhatsApp через Wazzup24 WABA
-- **Статус:** draft
-- **Файл:** [T05_s01_wazzup_messenger.md](3.%20tasks/S01_whatsapp_auto_notifications/T05_s01_wazzup_messenger.md)
-- **Требует:** T02
-- **Инкремент:** BaseMessenger + WazzupMessenger, отправка WABA-шаблона
+- **Статус:** ✅ done
+- **Файл:** [T05_s01_wazzup_messenger_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T05_s01_wazzup_messenger_done.md)
+- **Результат:** messenger/wazzup.py — WazzupMessenger с send_message(), build_message_text(), MessageData, MessengerError; retry 429/5xx, PII masking, lazy singleton
 
 **T06** — Webhook handler для Kommo
-- **Статус:** draft
+- **Статус:** draft (следующая)
 - **Файл:** [T06_s01_webhook_handler.md](3.%20tasks/S01_whatsapp_auto_notifications/T06_s01_webhook_handler.md)
 - **Требует:** T03, T04, T05
 - **Инкремент:** POST /webhook/kommo — полный цикл: webhook → Kommo API → Wazzup24 → SQLite
@@ -149,6 +147,16 @@
 ---
 
 ## История изменений
+
+### 2026-02-24 — T05 акцептована
+- WazzupMessenger (messenger/wazzup.py) реализован и прошёл код-ревью
+- Фиксы по ревью: добавлен build_message_text() и message_text в return dict, elif chain в error handling, комментарий о non-retry network errors, переименован WAZZUP_TEMPLATE_GUID → WAZZUP_TEMPLATE_ID
+- Docs sync: убран base.py из file trees, Flask→FastAPI, обновлён DoD в S01 spec (BaseMessenger → YAGNI)
+- Удалён неиспользуемый python-dateutil из requirements.txt
+
+### 2026-02-24 — T04 акцептована
+- Kommo API клиент (kommo.py) реализован и прошёл код-ревью
+- Фиксы по ревью: 429 retry из JSON body, extract_termin_date возвращает None при ошибке, JSONDecodeError handling, нормализация локальных немецких номеров (+0→+49), удалён мёртвый код
 
 ### 2026-02-23 — Синхронизация нумерации задач
 - HANDOFF приведён к нумерации файлов задач (T01-T11, 10 задач)

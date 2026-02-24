@@ -23,7 +23,7 @@
 |------|-----------|------------|
 | CRM | Kommo CRM (бывш. Kommo) | Источник данных, воронки "Госники" и "Бератер" |
 | Триггер | Kommo Webhooks | POST-запрос при смене этапа воронки |
-| Сервис | Python (Flask/FastAPI) | Приём webhooks, бизнес-логика, cron |
+| Сервис | Python (FastAPI) | Приём webhooks, бизнес-логика, cron |
 | Мессенджер | Wazzup24 WABA | Отправка WhatsApp (номер +49 3046690188, WABA-шаблоны) |
 | Хранение | SQLite | Лог отправок, очередь повторов |
 | Алерты | Telegram Bot API | Уведомление при ошибках |
@@ -66,19 +66,20 @@
 - Сообщения без ответа старше 24ч → повторная отправка (макс 2 раза)
 - Отложенные сообщения (вне окна 9–21) → отправка при наступлении окна
 
-### 3. Messenger layer (абстракция)
+### 3. Messenger layer
 
 ```python
-# messenger/base.py
-class BaseMessenger:
-    def send_message(self, phone: str, text: str, template_vars: dict = None) -> dict: ...
-    def check_delivery(self, message_id: str) -> str: ...
-
 # messenger/wazzup.py
-class WazzupMessenger(BaseMessenger): ...    # Wazzup24 WABA шаблоны
+class WazzupMessenger:
+    def send_message(self, phone: str, message_data: MessageData) -> dict: ...
+
+@dataclass
+class MessageData:
+    line: str           # "first" или "second"
+    termin_date: str    # "25.02.2026" (DD.MM.YYYY)
 ```
 
-Абстракция `BaseMessenger` сохранена для возможного подключения дополнительных каналов (SMS, Telegram) в будущем.
+Единственная реализация — `WazzupMessenger`. Абстракция `BaseMessenger` не создаётся (YAGNI — один backend). При необходимости добавить другой канал — выделить интерфейс.
 
 ### 4. Alert service
 
@@ -182,24 +183,28 @@ class WazzupMessenger(BaseMessenger): ...    # Wazzup24 WABA шаблоны
 3. **"Универсальный шаблон 4"** (templateGuid: `4e049e0c-c404-45ba-b516-5ae932260b19`) — для произвольного текста
 4. + ещё 6 одобренных шаблонов (см. README.md)
 
-**API методы:**
+**API методы (v3):**
 ```bash
 # Получить список шаблонов
 GET https://api.wazzup24.com/v3/templates/whatsapp
 Authorization: Bearer {API_KEY}
 
-# Отправить сообщение
+# Отправить WABA-шаблон
 POST https://api.wazzup24.com/v3/message
 Authorization: Bearer {API_KEY}
 Content-Type: application/json
 
 {
-  "channelId": "1b689b43-f846-41a6-bedc-cae01209fb8b",
+  "channelId": "uuid-канала",
   "chatId": "491234567890",
   "chatType": "whatsapp",
-  "text": "@template: 38194e93-e926-4826-babe-19032e0bd74c { [[SternMeister]]; [[термине]]; [[25.02 в 14:00]] }"
+  "templateId": "38194e93-e926-4826-babe-19032e0bd74c",
+  "templateValues": ["SternMeister", "термине", "25.02.2026"]
 }
+# Ответ: 201 Created → {"messageId": "uuid", "chatId": "..."}
 ```
+
+Подробная документация API: [wazzup24_api_reference.md](5.%20unsorted/wazzup24_api_reference.md)
 
 ---
 
@@ -216,11 +221,11 @@ Content-Type: application/json
 
 ```
 server/
-├── app.py              # Flask/FastAPI, webhook handler
+├── app.py              # FastAPI, webhook handler
 ├── cron.py             # Retry + отложенные сообщения
 ├── messenger/
-│   ├── base.py         # Абстракция (BaseMessenger)
-│   └── wazzup.py       # Wazzup24 WABA реализация
+│   ├── __init__.py     # Экспорт get_messenger, MessageData, MessengerError
+│   └── wazzup.py       # WazzupMessenger (lazy singleton, retry 429/5xx)
 ├── kommo.py            # Kommo API клиент
 ├── alerts.py           # Telegram-алерты
 ├── db.py               # SQLite
@@ -240,7 +245,7 @@ KOMMO_TOKEN=...
 WAZZUP_API_KEY=your_wazzup_api_key_here
 WAZZUP_API_URL=https://api.wazzup24.com/v3
 WAZZUP_CHANNEL_ID=your_wazzup_channel_id_here
-WAZZUP_TEMPLATE_GUID=your_wazzup_template_guid_here
+WAZZUP_TEMPLATE_ID=your_wazzup_template_id_here
 
 # Kommo webhook validation
 KOMMO_WEBHOOK_SECRET=...
@@ -281,4 +286,4 @@ DATABASE_PATH=./data/messages.db
 - [ ] Примечание в Kommo: "сообщение отправлено"
 - [ ] Алерт в Telegram при ошибке
 - [ ] Логирование всех событий в SQLite
-- [ ] Messenger-абстракция позволяет подключить дополнительные каналы (SMS, Telegram) без изменения логики
+- [ ] Messenger layer позволяет добавить дополнительные каналы (выделение интерфейса при необходимости)

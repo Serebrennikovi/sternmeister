@@ -64,11 +64,10 @@
 
 ```
 server/
-├── app.py              # Flask/FastAPI, webhook handler
+├── app.py              # FastAPI, webhook handler
 ├── cron.py             # Retry + отложенные сообщения
 ├── messenger/
-│   ├── __init__.py
-│   ├── base.py         # BaseMessenger (абстракция для будущих каналов)
+│   ├── __init__.py     # Экспорт get_messenger, MessageData, MessengerError
 │   └── wazzup.py       # WazzupMessenger (Wazzup24 WABA)
 ├── kommo.py            # Kommo CRM API клиент
 ├── alerts.py           # Telegram-алерты
@@ -85,7 +84,7 @@ server/
 |------|-----------|------------|
 | CRM | Kommo CRM | Источник данных, воронки "Госники" и "Бератер" |
 | Триггер | Kommo Webhooks | POST-запрос при смене этапа воронки |
-| Сервис | Python (Flask/FastAPI) | Приём webhooks, бизнес-логика, cron |
+| Сервис | Python (FastAPI) | Приём webhooks, бизнес-логика, cron |
 | Мессенджер | Wazzup24 WABA | Отправка через официальный WhatsApp Business API (номер +49 3046690188, WABA-шаблоны) |
 | Хранение | SQLite | Лог отправок, очередь повторов |
 | Алерты | Telegram Bot API | Уведомления при ошибках |
@@ -468,7 +467,7 @@ def determine_line(pipeline_id: int, status_id: int) -> str | None:
 - [ ] Примечание "WhatsApp сообщение отправлено" записывается в Kommo
 - [ ] Telegram-алерт отправляется при ошибке (Wazzup24 недоступен, невалидный номер и т.д.)
 - [ ] Все события логируются в SQLite (status, attempts, timestamps)
-- [ ] Messenger layer с BaseMessenger готов для добавления других каналов в будущем
+- [ ] Messenger layer позволяет добавить другие каналы в будущем (выделить интерфейс при необходимости)
 - [ ] Wazzup24 использует WABA-шаблон "Напоминание о записи или встрече"
 - [ ] Cron-задача запускается каждый час и обрабатывает повторы + отложенные сообщения
 - [ ] Проект запускается в Docker на сервере Hetzner (65.108.154.202)
@@ -492,7 +491,7 @@ def determine_line(pipeline_id: int, status_id: int) -> str | None:
 - [ ] Webhook от Kommo → запись в SQLite → отправка через Wazzup24 WABA
 - [ ] Webhook вне окна 9-21 → `status=pending`, `next_retry_at` установлен корректно
 - [ ] Cron-задача обрабатывает повторы: `attempts < 3`, `next_retry_at` обновляется
-- [ ] Messenger layer готов для добавления других каналов (BaseMessenger абстракция)
+- [ ] Messenger layer позволяет добавить другие каналы (без BaseMessenger — YAGNI, один backend)
 - [ ] Kommo API: создание примечания после отправки сообщения
 
 ### Тестирование в реальной среде
@@ -555,8 +554,8 @@ def determine_line(pipeline_id: int, status_id: int) -> str | None:
 - **T01** ✅ — Сбор конфигурации из Kommo CRM (pipeline_id, status_id, field_id)
 - **T02** ✅ — Scaffold проекта и базовая инфраструктура
 - **T03** ✅ — SQLite модель и логирование
-- **T04** — Kommo API клиент (get_lead, extract_phone, add_note)
-- **T05** — Отправка WhatsApp через Wazzup24 WABA (BaseMessenger + WazzupMessenger)
+- **T04** ✅ — Kommo API клиент (get_lead, extract_phone, add_note)
+- **T05** ✅ — Отправка WhatsApp через Wazzup24 WABA (WazzupMessenger)
 - **T06** — Webhook handler для Kommo (POST /webhook/kommo)
 - **T07** — Логика окна времени и отложенные сообщения (9:00-21:00 CET/CEST)
 - **T08** — Cron-задача для повторов (через 24ч, максимум 2 раза)
@@ -605,9 +604,16 @@ def determine_line(pipeline_id: int, status_id: int) -> str | None:
 
 ## История изменений
 
+### v2.3 (2026-02-24)
+- T05 акцептована: WazzupMessenger (messenger/wazzup.py) — send_message, build_message_text, MessageData, MessengerError
+- Убран base.py из file tree (YAGNI), Flask→FastAPI в стеке, обновлён DoD
+
+### v2.2 (2026-02-24)
+- T04 акцептована: Kommo API клиент (kommo.py) — KommoClient, get_lead_with_contacts, extract_phone, extract_termin_date, add_note
+
 ### v2.1 (2026-02-23)
 - Убран Green API (используется только Wazzup24 WABA)
-- Упрощена архитектура messenger layer (BaseMessenger для будущих каналов, единственная реализация WazzupMessenger)
+- Упрощена архитектура messenger layer (без BaseMessenger — YAGNI, единственная реализация WazzupMessenger)
 - Обновлена декомпозиция задач: T02 сразу реализует Wazzup24, удалена старая T08 (переключение на Wazzup)
 - Обновлены тесты и критерии приёмки
 - Тестирование напрямую на Wazzup24 с тестовыми пользователями

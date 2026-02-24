@@ -22,7 +22,7 @@ KOMMO_TOKEN = _require("KOMMO_TOKEN")
 WAZZUP_API_KEY = _require("WAZZUP_API_KEY")
 WAZZUP_API_URL = os.getenv("WAZZUP_API_URL", "https://api.wazzup24.com/v3")
 WAZZUP_CHANNEL_ID = _require("WAZZUP_CHANNEL_ID")
-WAZZUP_TEMPLATE_GUID = _require("WAZZUP_TEMPLATE_GUID")
+WAZZUP_TEMPLATE_ID = _require("WAZZUP_TEMPLATE_ID")
 
 # Kommo webhook validation (optional for now, required for production)
 KOMMO_WEBHOOK_SECRET = os.getenv("KOMMO_WEBHOOK_SECRET", "")
