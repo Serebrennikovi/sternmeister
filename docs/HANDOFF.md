@@ -6,7 +6,7 @@
 
 ## Текущий статус
 
-Проект в стадии **активной разработки**. Foundation (T01-T03), Core (T04-T07), Cron (T08) и Telegram алерты (T09) завершены. Полный цикл: webhook → Kommo API → проверка окна 9-21 → Wazzup24 → SQLite + cron retry/pending + Telegram алерты при ошибках. Переходим к T10 (деплой на Hetzner).
+Проект **задеплоен в продакшн**. T01-T10 завершены. Сервис работает на Hetzner (65.108.154.202) через ngrok (`https://shternmeister.ngrok.pro`). Полный цикл: webhook → Kommo API → проверка окна 9-21 → Wazzup24 → SQLite + cron retry/pending + Telegram алерты при ошибках. Webhook secret validation активна. Следующая задача: T11 (интеграционное тестирование + настройка webhook в Kommo UI).
 
 ---
 
@@ -23,7 +23,7 @@
 ## Задачи S01
 
 **Всего задач:** 10 (T01-T11, без пропусков)
-**Текущая задача:** T10 — Деплой на Hetzner
+**Текущая задача:** T11 — Интеграционное тестирование и доработки
 
 ### Фаза 1: Foundation (последовательно)
 
@@ -79,10 +79,9 @@
 ### Фаза 4: Production
 
 **T10** — Деплой на Hetzner и настройка webhook
-- **Статус:** in_progress
-- **Файл:** [T10_s01_deploy.md](3.%20tasks/S01_whatsapp_auto_notifications/T10_s01_deploy.md)
-- **Требует:** T06-T09
-- **Инкремент:** Docker на Hetzner, ngrok + SSL, webhook URL в Kommo
+- **Статус:** ✅ done
+- **Файл:** [T10_s01_deploy_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T10_s01_deploy_done.md)
+- **Результат:** Docker на Hetzner (UID 999, HEALTHCHECK, log rotation), ngrok systemd service, webhook secret validation (hmac.compare_digest), --no-access-log (prevent secret leak), systemd cron timer, enhanced /health endpoint. Deploy doc: rsync, .env management, ngrok, systemd units, test commands
 
 **T11** — Интеграционное тестирование и доработки
 - **Статус:** draft
@@ -127,7 +126,8 @@
 ## Внешние зависимости
 
 - [x] Доступ к Kommo CRM
-- [ ] Webhook URL для Kommo (нужен публичный URL)
+- [x] Webhook URL для Kommo: `https://shternmeister.ngrok.pro/webhook/kommo?secret=...`
+- [ ] Webhook настроен в Kommo UI (ожидает T11)
 - [ ] Telegram бот для алертов (опционально)
 
 ---
@@ -143,6 +143,16 @@
 ---
 
 ## История изменений
+
+### 2026-02-24 — T10 акцептована
+- Деплой на Hetzner: Docker container, ngrok systemd service, systemd cron timer
+- Webhook secret validation (hmac.compare_digest, secret-in-URL)
+- Docker HEALTHCHECK (60s interval, urllib.request)
+- Enhanced /health endpoint: server_time_utc, server_time_berlin, in_window
+- --no-access-log в uvicorn (предотвращает утечку webhook secret в логи)
+- Startup warning при отсутствии KOMMO_WEBHOOK_SECRET
+- Ревью-фиксы: process_retries обновляет next_retry_at при ошибке (был баг — агрессивный 1h re-retry), исправлена формулировка HEALTHCHECK (мониторинг, не auto-restart), S01 spec: rate limiting→TODO, добавлен termin_date и idx_dedup в schema
+- Webhook URL: `https://shternmeister.ngrok.pro/webhook/kommo?secret=...`
 
 ### 2026-02-24 — T09 акцептована
 - Telegram алерты (alerts.py): TelegramAlerter с lazy singleton, PII masking, Markdown escaping, graceful degradation

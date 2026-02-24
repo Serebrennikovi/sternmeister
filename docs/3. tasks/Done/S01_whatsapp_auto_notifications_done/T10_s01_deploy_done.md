@@ -1,5 +1,5 @@
-**Дата:** 2026-02-23
-**Статус:** in_progress
+**Дата:** 2026-02-24
+**Статус:** done
 **Спецификация:** [S01_whatsapp_auto_notifications.md](../../2.%20specifications/S01_whatsapp_auto_notifications.md)
 
 # T10 — Деплой на Hetzner и настройка webhook

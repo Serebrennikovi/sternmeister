@@ -562,7 +562,7 @@ def determine_line(pipeline_id: int, status_id: int) -> str | None:
 - **T07** ✅ — Логика окна времени и отложенные сообщения (9:00-21:00 CET/CEST)
 - **T08** ✅ — Cron-задача для повторов (через 24ч, максимум 2 раза)
 - **T09** ✅ — Telegram алерты при ошибках (alerts.py, интеграция в app.py/cron.py, 31 тест)
-- **T10** — Деплой на Hetzner VPS
+- **T10** ✅ — Деплой на Hetzner VPS (Docker, ngrok, webhook secret, cron timer)
 - **T11** — Интеграционное тестирование и доработки
 
 ---
