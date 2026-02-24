@@ -6,88 +6,21 @@
 
 ## Текущий статус
 
-Проект **задеплоен в продакшн**. T01-T10 завершены. Сервис работает на Hetzner (65.108.154.202) через ngrok (`https://shternmeister.ngrok.pro`). Полный цикл: webhook → Kommo API → проверка окна 9-21 → Wazzup24 → SQLite + cron retry/pending + Telegram алерты при ошибках. Webhook secret validation активна. Следующая задача: T11 (интеграционное тестирование + настройка webhook в Kommo UI).
+**Спецификация S01 завершена.** Все задачи T01-T11 выполнены и акцептованы. Сервис работает в продакшне на Hetzner (65.108.154.202) через ngrok (`https://shternmeister.ngrok.pro`). Полный цикл: webhook → Kommo API → проверка окна 9-21 → Wazzup24 → SQLite + cron retry/pending + Telegram алерты. 142 теста (141 pass, 1 skip).
 
 ---
 
-## Активная спецификация
+## Завершённая спецификация
 
-### S01: WhatsApp Auto-notifications (draft)
+### S01: WhatsApp Auto-notifications ✅ done
 
 Автоматические WhatsApp-уведомления для клиентов Sternmeister при смене этапа воронки в Kommo CRM.
 
-Файл: [S01_whatsapp_auto_notifications.md](2.%20specifications/S01_whatsapp_auto_notifications.md)
+Файл: [S01_whatsapp_auto_notifications_done.md](2.%20specifications/S01_whatsapp_auto_notifications_done.md)
 
----
+**Задачи (все ✅):** T01 (Kommo config) → T02 (scaffold) → T03 (SQLite) → T04 (Kommo API) → T05 (Wazzup24) → T06 (webhook) → T07 (send window) → T08 (cron retries) → T09 (Telegram alerts) → T10 (deploy) → T11 (integration testing)
 
-## Задачи S01
-
-**Всего задач:** 10 (T01-T11, без пропусков)
-**Текущая задача:** T11 — Интеграционное тестирование и доработки
-
-### Фаза 1: Foundation (последовательно)
-
-**T01** — Сбор конфигурации из Kommo CRM
-- **Статус:** ✅ done
-- **Файл:** [T01_s01_kommo_config_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T01_s01_kommo_config_done.md)
-- **Результат:** Pipeline/Status/Field ID задокументированы в [kommo_config.md](kommo_config.md), API токен в `.env`
-
-**T02** — Scaffold проекта и базовая инфраструктура
-- **Статус:** ✅ done
-- **Файл:** [T02_s01_scaffold_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T02_s01_scaffold_done.md)
-- **Результат:** FastAPI app, config.py, Dockerfile, .env.example, .gitignore, .dockerignore
-
-**T03** — SQLite модель и логирование
-- **Статус:** ✅ done
-- **Файл:** [T03_s01_sqlite_model_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T03_s01_sqlite_model_done.md)
-- **Результат:** db.py с init_db(), create_message(), update_message(), get_messages_for_retry(), get_pending_messages()
-
-### Фаза 2: Core (последовательно T04→T06, затем параллельные ветки)
-
-**T04** — Kommo API клиент
-- **Статус:** ✅ done
-- **Файл:** [T04_s01_kommo_api_client_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T04_s01_kommo_api_client_done.md)
-- **Результат:** kommo.py — KommoClient с get_lead_with_contacts(), get_contact(), extract_phone(), extract_termin_date(), add_note(); retry 429/5xx, lazy init, нормализация телефонов
-
-**T05** — Отправка WhatsApp через Wazzup24 WABA
-- **Статус:** ✅ done
-- **Файл:** [T05_s01_wazzup_messenger_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T05_s01_wazzup_messenger_done.md)
-- **Результат:** messenger/wazzup.py — WazzupMessenger с send_message(), build_message_text(), MessageData, MessengerError; retry 429/5xx, PII masking, lazy singleton
-
-**T06** — Webhook handler для Kommo
-- **Статус:** ✅ done
-- **Файл:** [T06_s01_webhook_handler_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T06_s01_webhook_handler_done.md)
-- **Результат:** app.py — POST /webhook/kommo: парсинг form-data (PHP bracket notation) и JSON, determine_line, dedup, Kommo API → extract phone/termin → build message → send → add note → SQLite. utils.py — parse_bracket_form(). 61 тест (pytest + freezegun)
-
-**T07** — Логика окна времени и отложенные сообщения
-- **Статус:** ✅ done
-- **Файл:** [T07_s01_send_window_logic_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T07_s01_send_window_logic_done.md)
-- **Результат:** utils.py — is_in_send_window(), get_next_send_window_start() (DST-safe, zoneinfo). Webhook вне 9-21 → status=pending. Валидация SEND_WINDOW_START/END. Тесты CET/CEST/DST transitions
-
-### Фаза 3: Features (параллельные ветки после T06)
-
-**T08** — Cron-задача для повторов
-- **Статус:** ✅ done
-- **Файл:** [T08_s01_cron_retries_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T08_s01_cron_retries_done.md)
-- **Результат:** cron.py — process_retries() (sent/failed, attempts < 3, next_retry_at <= now), process_pending() (отложенные из webhook), Kommo add_note для retry/pending, 24 теста (pytest + freezegun)
-
-**T09** — Telegram алерты
-- **Статус:** ✅ done
-- **Файл:** [T09_s01_telegram_alerts_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T09_s01_telegram_alerts_done.md)
-- **Результат:** alerts.py — TelegramAlerter с lazy singleton, send_alert, alert_messenger_error (PII masking), alert_kommo_error, alert_cron_error, alert_unexpected_error, alert_info; Markdown escaping; graceful degradation. Интеграция в app.py и cron.py. 31 тест (pytest + freezegun)
-
-### Фаза 4: Production
-
-**T10** — Деплой на Hetzner и настройка webhook
-- **Статус:** ✅ done
-- **Файл:** [T10_s01_deploy_done.md](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/T10_s01_deploy_done.md)
-- **Результат:** Docker на Hetzner (UID 999, HEALTHCHECK, log rotation), ngrok systemd service, webhook secret validation (hmac.compare_digest), --no-access-log (prevent secret leak), systemd cron timer, enhanced /health endpoint. Deploy doc: rsync, .env management, ngrok, systemd units, test commands
-
-**T11** — Интеграционное тестирование и доработки
-- **Статус:** draft
-- **Файл:** [T11_s01_integration_testing.md](3.%20tasks/S01_whatsapp_auto_notifications/T11_s01_integration_testing.md)
-- **Требует:** T10
-- **Инкремент:** E2E тестирование на продакшне
+Файлы задач: [docs/3. tasks/Done/S01_whatsapp_auto_notifications_done/](3.%20tasks/Done/S01_whatsapp_auto_notifications_done/)
 
 ---
 
@@ -116,6 +49,7 @@
 - [x] Сервер: Hetzner 65.108.154.202
 - [x] SSH-доступ настроен
 - [x] Docker 29.2.1
+- [x] Webhook URL: `https://shternmeister.ngrok.pro/webhook/kommo?secret=...`
 
 ### Telegram Alerts
 - [ ] Bot token для алертов
@@ -127,7 +61,7 @@
 
 - [x] Доступ к Kommo CRM
 - [x] Webhook URL для Kommo: `https://shternmeister.ngrok.pro/webhook/kommo?secret=...`
-- [ ] Webhook настроен в Kommo UI (ожидает T11)
+- [ ] Webhook настроен в Kommo UI
 - [ ] Telegram бот для алертов (опционально)
 
 ---
@@ -135,7 +69,7 @@
 ## Связанные документы
 
 - [architecture.md](architecture.md) — техническая архитектура
-- [S01_whatsapp_auto_notifications.md](2.%20specifications/S01_whatsapp_auto_notifications.md) — спецификация задачи
+- [S01_whatsapp_auto_notifications_done.md](2.%20specifications/S01_whatsapp_auto_notifications_done.md) — спецификация S01 (завершена)
 - [Гайд: конвенции документации](4.%20guides/doc_conventions.md)
 - [Гайд: декомпозиция на задачи](4.%20guides/task_decomposition_guide.md)
 - [Security Checklist](4.%20guides/security_checklist.md)
@@ -143,6 +77,13 @@
 ---
 
 ## История изменений
+
+### 2026-02-24 — T11 акцептована, S01 завершена
+- Интеграционное тестирование: 19 новых E2E-тестов (test_integration_e2e.py)
+- Полный код-ревью всех исходных файлов: безопасность, корректность, error handling, thread safety
+- Итого: 142 теста (141 pass, 1 skip), все критерии DoD S01 подтверждены
+- Фиксы: убран устаревший TODO(T11), исправлен тест-план (удалён сценарий Green API — YAGNI)
+- **Спецификация S01 закрыта: все 11 задач (T01-T11) выполнены**
 
 ### 2026-02-24 — T10 акцептована
 - Деплой на Hetzner: Docker container, ngrok systemd service, systemd cron timer

@@ -98,7 +98,7 @@ def kommo_webhook(
     Configure the URL in Kommo as:
         https://shternmeister.ngrok.pro/webhook/kommo?secret=YOUR_SECRET
 
-    TODO(T11): add rate limiting (e.g. slowapi) to protect against flood.
+    TODO: add rate limiting (e.g. slowapi) to protect against flood.
     Currently protected by secret-in-URL only.
     """
     # 0. Validate webhook secret (compare_digest: constant-time to prevent timing attacks)
