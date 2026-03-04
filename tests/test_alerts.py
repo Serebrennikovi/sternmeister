@@ -282,7 +282,7 @@ class TestWebhookAlerterIntegration:
         from server.app import app
         return TestClient(app)
 
-    def _payload(self, lead_id=123, status_id=9386032, pipeline_id=12154099):
+    def _payload(self, lead_id=123, status_id=93860331, pipeline_id=12154099):
         return {
             "leads": {
                 "status": [{
@@ -338,7 +338,8 @@ class TestWebhookAlerterIntegration:
     @patch("server.app.get_alerter")
     @patch("server.app.get_recent_message", return_value=None)
     @patch("server.app.get_kommo_client")
-    def test_no_termin_triggers_warning(self, mock_gc, mock_dedup, mock_ga, client):
+    def test_no_name_triggers_warning(self, mock_gc, mock_dedup, mock_ga, client):
+        """For berater_accepted (S02): missing name → send_alert WARNING."""
         kommo = MagicMock()
         kommo.get_lead_contact.return_value = (
             {"id": 123, "custom_fields_values": []},
@@ -347,7 +348,8 @@ class TestWebhookAlerterIntegration:
             ]},
         )
         kommo.extract_phone.return_value = "+491234567890"
-        kommo.extract_termin_date.return_value = None
+        kommo.extract_termin_date.return_value = None  # optional for berater_accepted
+        kommo.extract_name.return_value = None          # name missing → warning
         mock_gc.return_value = kommo
 
         alerter = MagicMock()
@@ -383,6 +385,7 @@ class TestWebhookAlerterIntegration:
         )
         kommo.extract_phone.return_value = "+491234567890"
         kommo.extract_termin_date.return_value = "25.02.2026"
+        kommo.extract_name.return_value = "Test User"  # required for berater_accepted
         mock_gc.return_value = kommo
 
         messenger = MagicMock()
@@ -433,7 +436,8 @@ class TestCronAlerterIntegration:
 
         mock_gmr.return_value = [
             {"id": 1, "phone": "+491234567890", "line": "first",
-             "termin_date": "25.02.2026", "attempts": 1, "kommo_lead_id": 100},
+             "termin_date": "25.02.2026", "attempts": 1, "kommo_lead_id": 100,
+             "template_values": None},
         ]
         m = MagicMock()
         m.send_message.side_effect = MessengerError("Wazzup timeout")
@@ -461,7 +465,8 @@ class TestCronAlerterIntegration:
 
         mock_gpm.return_value = [
             {"id": 2, "phone": "+499876543210", "line": "second",
-             "termin_date": "01.03.2026", "attempts": 0, "kommo_lead_id": 200},
+             "termin_date": "01.03.2026", "attempts": 0, "kommo_lead_id": 200,
+             "template_values": None},
         ]
         m = MagicMock()
         m.send_message.side_effect = MessengerError("connection refused")

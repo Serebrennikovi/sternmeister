@@ -1,4 +1,4 @@
-"""End-to-end integration tests for T11.
+"""End-to-end integration tests for T11/T12.
 
 These tests verify the full webhook → Kommo API → messenger → DB flow
 using mocked external services (Kommo, Wazzup24, Telegram).
@@ -12,6 +12,7 @@ Run: docker run --rm --user root -v $(pwd)/tests:/app/tests \
 """
 
 import os
+import json
 import sqlite3
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -39,18 +40,18 @@ from server.db import _get_conn, get_message_by_id, get_messages, init_db
 
 BERLIN_TZ = ZoneInfo("Europe/Berlin")
 
-# Real Kommo pipeline/status IDs
+# S02 Kommo pipeline/status IDs
 BERATAR_PIPELINE = 12154099
-FIRST_LINE_STATUS = 9386032      # "Принято от первой линии"
-SECOND_LINE_STATUS = 10093587    # "Термин ДЦ"
-GOSNIKI_PIPELINE = 10631243
-GOSNIKI_FIRST_STATUS = 8152349
+BERATER_ACCEPTED_STATUS = 93860331   # "Принято от первой линии" → berater_accepted (S02)
+GOSNIKI_PIPELINE = 10935879
+GOSNIKI_STATUS = 95514983            # "Консультация проведена" → gosniki_consultation_done
 
 
-def _make_contact(contact_id=100, phone="+491761234567"):
+def _make_contact(contact_id=100, phone="+491761234567", name="Test User"):
     """Build a Kommo contact dict with phone."""
     return {
         "id": contact_id,
+        "name": name,
         "custom_fields_values": [
             {
                 "field_code": "PHONE",
@@ -60,7 +61,7 @@ def _make_contact(contact_id=100, phone="+491761234567"):
     }
 
 
-def _make_lead(lead_id=1, pipeline_id=BERATAR_PIPELINE, status_id=FIRST_LINE_STATUS,
+def _make_lead(lead_id=1, pipeline_id=BERATAR_PIPELINE, status_id=BERATER_ACCEPTED_STATUS,
                contact_id=100, termin_timestamp=None):
     """Build a Kommo lead dict with termin date field."""
     if termin_timestamp is None:
@@ -86,7 +87,7 @@ def _make_lead(lead_id=1, pipeline_id=BERATAR_PIPELINE, status_id=FIRST_LINE_STA
     }
 
 
-def _make_webhook_payload(lead_id=1, status_id=FIRST_LINE_STATUS,
+def _make_webhook_payload(lead_id=1, status_id=BERATER_ACCEPTED_STATUS,
                           pipeline_id=BERATAR_PIPELINE):
     """Build a minimal webhook JSON payload."""
     return {
@@ -130,18 +131,18 @@ def client():
     return TestClient(app, raise_server_exceptions=False)
 
 
-class TestScenario1FirstLine:
-    """Scenario 1: First line — запись на термин.
+class TestScenario1BeraterAccepted:
+    """Scenario 1: Berater accepted — консультация принята от 1й линии.
 
-    Lead moves to "Принято от первой линии" → WhatsApp sent,
-    Kommo note added, DB record with status=sent, line=first, attempts=1.
+    Lead moves to status 93860331 → "berater_accepted" → WhatsApp sent with name,
+    Kommo note added, DB record with status=sent, line=berater_accepted, attempts=1.
     """
 
     @freeze_time("2026-02-25 10:00:00", tz_offset=0)  # inside window
-    def test_full_flow_first_line(self, client, _temp_db):
+    def test_full_flow_berater_accepted(self, client, _temp_db):
         lead = _make_lead(lead_id=42, contact_id=200, pipeline_id=BERATAR_PIPELINE,
-                          status_id=FIRST_LINE_STATUS)
-        contact = _make_contact(contact_id=200, phone="+996501354144")
+                          status_id=BERATER_ACCEPTED_STATUS)
+        contact = _make_contact(contact_id=200, phone="+996501354144", name="Анна Петрова")
 
         with patch("server.app.get_kommo_client") as mock_kommo_cls, \
              patch("server.app.get_messenger") as mock_msgr_cls, \
@@ -150,22 +151,20 @@ class TestScenario1FirstLine:
             kommo = MagicMock()
             kommo.get_lead_contact.return_value = (lead, contact)
             kommo.extract_phone.return_value = "+996501354144"
-            kommo.extract_termin_date.side_effect = lambda ld, fid: "26.02.2026" if fid == 885996 else None
+            kommo.extract_name.return_value = "Анна Петрова"
+            kommo.extract_termin_date.return_value = None  # optional for berater_accepted
             mock_kommo_cls.return_value = kommo
 
             messenger = MagicMock()
-            messenger.build_message_text.return_value = (
-                "Здравствуйте. Это SternMeister. Напоминаем о записи на термин в 26.02.2026. "
-                "Скажите, все в силе?"
-            )
+            messenger.build_message_text.return_value = "[template] Анна Петрова"
             messenger.send_message.return_value = {
                 "message_id": "wazzup-msg-001",
                 "status": "sent",
-                "message_text": "...",
+                "message_text": "[template] Анна Петрова",
             }
             mock_msgr_cls.return_value = messenger
 
-            payload = _make_webhook_payload(lead_id=42, status_id=FIRST_LINE_STATUS,
+            payload = _make_webhook_payload(lead_id=42, status_id=BERATER_ACCEPTED_STATUS,
                                             pipeline_id=BERATAR_PIPELINE)
             resp = client.post("/webhook/kommo", json=payload)
 
@@ -180,29 +179,30 @@ class TestScenario1FirstLine:
         msg = get_message_by_id(msg_id)
         assert msg is not None
         assert msg["status"] == "sent"
-        assert msg["line"] == "first"
+        assert msg["line"] == "berater_accepted"
         assert msg["attempts"] == 1
         assert msg["phone"] == "+996501354144"
         assert msg["kommo_lead_id"] == 42
         assert msg["sent_at"] is not None
         assert msg["next_retry_at"] is not None
         assert msg["messenger_id"] == "wazzup-msg-001"
+        assert msg["template_values"] == json.dumps(["Анна Петрова"])
 
         # Verify Kommo note was called
         kommo.add_note.assert_called_once()
         note_text = kommo.add_note.call_args[0][1]
         assert "WhatsApp сообщение отправлено" in note_text
-        assert "first" in note_text
+        assert "berater_accepted" in note_text
 
 
-class TestScenario2SecondLine:
-    """Scenario 2: Second line — напоминание о термине ДЦ."""
+class TestScenario2GosnikisConsultation:
+    """Scenario 2: Gosniki consultation done — консультация проведена Госники."""
 
     @freeze_time("2026-02-25 12:00:00", tz_offset=0)
-    def test_full_flow_second_line(self, client, _temp_db):
-        lead = _make_lead(lead_id=55, contact_id=300, pipeline_id=BERATAR_PIPELINE,
-                          status_id=SECOND_LINE_STATUS)
-        contact = _make_contact(contact_id=300, phone="+79167310500")
+    def test_full_flow_gosniki_consultation_done(self, client, _temp_db):
+        lead = _make_lead(lead_id=55, contact_id=300, pipeline_id=GOSNIKI_PIPELINE,
+                          status_id=GOSNIKI_STATUS)
+        contact = _make_contact(contact_id=300, phone="+79167310500", name="Мария Сидорова")
 
         with patch("server.app.get_kommo_client") as mock_kommo_cls, \
              patch("server.app.get_messenger") as mock_msgr_cls, \
@@ -211,23 +211,21 @@ class TestScenario2SecondLine:
             kommo = MagicMock()
             kommo.get_lead_contact.return_value = (lead, contact)
             kommo.extract_phone.return_value = "+79167310500"
-            kommo.extract_termin_date.side_effect = lambda ld, fid: "27.02.2026" if fid == 885996 else None
+            kommo.extract_name.return_value = "Мария Сидорова"
+            kommo.extract_termin_date.return_value = None  # optional
             mock_kommo_cls.return_value = kommo
 
             messenger = MagicMock()
-            messenger.build_message_text.return_value = (
-                "Здравствуйте. Это SternMeister. Напоминаем о термине в 27.02.2026. "
-                "Скажите, все в силе?"
-            )
+            messenger.build_message_text.return_value = "[template] Мария Сидорова"
             messenger.send_message.return_value = {
                 "message_id": "wazzup-msg-002",
                 "status": "sent",
-                "message_text": "...",
+                "message_text": "[template] Мария Сидорова",
             }
             mock_msgr_cls.return_value = messenger
 
-            payload = _make_webhook_payload(lead_id=55, status_id=SECOND_LINE_STATUS,
-                                            pipeline_id=BERATAR_PIPELINE)
+            payload = _make_webhook_payload(lead_id=55, status_id=GOSNIKI_STATUS,
+                                            pipeline_id=GOSNIKI_PIPELINE)
             resp = client.post("/webhook/kommo", json=payload)
 
         assert resp.status_code == 200
@@ -237,8 +235,9 @@ class TestScenario2SecondLine:
 
         msg = get_message_by_id(msg_id)
         assert msg["status"] == "sent"
-        assert msg["line"] == "second"
+        assert msg["line"] == "gosniki_consultation_done"
         assert msg["phone"] == "+79167310500"
+        assert msg["template_values"] == json.dumps(["Мария Сидорова"])
 
 
 class TestScenario3PendingOutsideWindow:
@@ -247,7 +246,7 @@ class TestScenario3PendingOutsideWindow:
     @freeze_time("2026-02-25 22:00:00", tz_offset=0)  # 23:00 Berlin (CET+1)
     def test_outside_window_creates_pending(self, client, _temp_db):
         lead = _make_lead(lead_id=70)
-        contact = _make_contact(phone="+491761234567")
+        contact = _make_contact(phone="+491761234567", name="Иван Иванов")
 
         with patch("server.app.get_kommo_client") as mock_kommo_cls, \
              patch("server.app.get_messenger") as mock_msgr_cls, \
@@ -256,11 +255,12 @@ class TestScenario3PendingOutsideWindow:
             kommo = MagicMock()
             kommo.get_lead_contact.return_value = (lead, contact)
             kommo.extract_phone.return_value = "+491761234567"
-            kommo.extract_termin_date.side_effect = lambda ld, fid: "26.02.2026" if fid == 885996 else None
+            kommo.extract_name.return_value = "Иван Иванов"
+            kommo.extract_termin_date.return_value = None
             mock_kommo_cls.return_value = kommo
 
             messenger = MagicMock()
-            messenger.build_message_text.return_value = "test message"
+            messenger.build_message_text.return_value = "[template] Иван Иванов"
             mock_msgr_cls.return_value = messenger
 
             payload = _make_webhook_payload(lead_id=70)
@@ -277,6 +277,7 @@ class TestScenario3PendingOutsideWindow:
         assert msg["attempts"] == 0
         assert msg["sent_at"] is None
         assert msg["next_retry_at"] is not None
+        assert msg["template_values"] == json.dumps(["Иван Иванов"])
 
         # Verify messenger.send_message was NOT called
         messenger.send_message.assert_not_called()
@@ -378,7 +379,7 @@ class TestScenario5MessengerError:
         from server.messenger.wazzup import MessengerError
 
         lead = _make_lead(lead_id=80)
-        contact = _make_contact(phone="+123")
+        contact = _make_contact(phone="+123", name="Test User")
 
         with patch("server.app.get_kommo_client") as mock_kommo_cls, \
              patch("server.app.get_messenger") as mock_msgr_cls, \
@@ -387,7 +388,8 @@ class TestScenario5MessengerError:
             kommo = MagicMock()
             kommo.get_lead_contact.return_value = (lead, contact)
             kommo.extract_phone.return_value = "+123"
-            kommo.extract_termin_date.side_effect = lambda ld, fid: "26.02.2026" if fid == 885996 else None
+            kommo.extract_name.return_value = "Test User"
+            kommo.extract_termin_date.return_value = None
             mock_kommo_cls.return_value = kommo
 
             messenger = MagicMock()
@@ -443,7 +445,7 @@ class TestScenario6KommoAPIError:
 
 
 class TestScenario8DoD:
-    """Scenario 8: Verify all S01 DoD criteria are met."""
+    """Scenario 8: Verify all S01/S02 DoD criteria are met."""
 
     def test_webhook_accepts_json_and_form(self, client):
         """DoD: Webhook от Kommo принимается корректно."""
@@ -484,13 +486,13 @@ class TestScenario8DoD:
     def test_dedup_window(self, client, _temp_db):
         """DoD: Deduplication within 10 minutes."""
         from server.db import create_message
-        # Create a recent message for lead 42
+        # Create a recent berater_accepted message for lead 42
         create_message(
             kommo_lead_id=42,
             kommo_contact_id=100,
             phone="+491761234567",
-            line="first",
-            termin_date="26.02.2026",
+            line="berater_accepted",
+            termin_date="",
             message_text="test",
             status="sent",
         )
@@ -498,32 +500,39 @@ class TestScenario8DoD:
         with patch("server.app.get_kommo_client"), \
              patch("server.app.get_messenger"), \
              patch("server.app.get_alerter"):
-            payload = _make_webhook_payload(lead_id=42, status_id=FIRST_LINE_STATUS)
+            payload = _make_webhook_payload(lead_id=42, status_id=BERATER_ACCEPTED_STATUS)
             resp = client.post("/webhook/kommo", json=payload)
 
         result = resp.json()["results"][0]
         assert "Duplicate" in result["message"]
 
     def test_waba_template_text(self):
-        """DoD: Wazzup24 uses WABA template 'Напоминание о записи или встрече'."""
+        """DoD: Wazzup24 uses WABA template variables correctly."""
         from server.messenger.wazzup import WazzupMessenger, MessageData
         with patch("server.config.WAZZUP_API_KEY", "test"), \
              patch("server.config.WAZZUP_CHANNEL_ID", "ch"), \
              patch("server.config.WAZZUP_TEMPLATE_ID", "tpl"), \
              patch("server.config.WAZZUP_API_URL", "http://test"):
             m = WazzupMessenger()
+            # S01 "first" line — backward compat
             text_first = m.build_message_text(MessageData(line="first", termin_date="25.02.2026"))
             assert "SternMeister" in text_first
             assert "записи на термин" in text_first
             assert "25.02.2026" in text_first
-            assert "все в силе" in text_first
 
+            # S01 "second" line — backward compat
             text_second = m.build_message_text(MessageData(line="second", termin_date="26.02.2026"))
             assert "термине" in text_second
             assert "26.02.2026" in text_second
 
+            # S02 berater_accepted — uses name variable
+            text_berater = m.build_message_text(
+                MessageData(line="berater_accepted", termin_date="", name="Анна")
+            )
+            assert "Анна" in text_berater
+
     def test_health_endpoint(self, client):
-        """DoD: Health check works."""
+        """DoD: Health check works and includes failed_temporal."""
         resp = client.get("/health")
         assert resp.status_code == 200
         data = resp.json()
@@ -532,6 +541,7 @@ class TestScenario8DoD:
         assert "in_window" in data
         assert "server_time_utc" in data
         assert "server_time_berlin" in data
+        assert "failed_temporal" in data
 
     def test_env_example_has_all_vars(self):
         """DoD: .env.example contains all required env vars."""
@@ -640,7 +650,7 @@ class TestFullLifecycle:
         from server.db import update_message
 
         lead = _make_lead(lead_id=99, contact_id=500)
-        contact = _make_contact(contact_id=500, phone="+491761234567")
+        contact = _make_contact(contact_id=500, phone="+491761234567", name="Тест Тестов")
 
         # Step 1: Initial send via webhook
         with patch("server.app.get_kommo_client") as mock_kommo_cls, \
@@ -650,12 +660,15 @@ class TestFullLifecycle:
             kommo = MagicMock()
             kommo.get_lead_contact.return_value = (lead, contact)
             kommo.extract_phone.return_value = "+491761234567"
-            kommo.extract_termin_date.side_effect = lambda ld, fid: "26.02.2026" if fid == 885996 else None
+            kommo.extract_name.return_value = "Тест Тестов"
+            kommo.extract_termin_date.return_value = None
             mock_kommo_cls.return_value = kommo
 
             messenger = MagicMock()
-            messenger.build_message_text.return_value = "test"
-            messenger.send_message.return_value = {"message_id": "msg-init", "status": "sent", "message_text": "test"}
+            messenger.build_message_text.return_value = "[template] Тест Тестов"
+            messenger.send_message.return_value = {
+                "message_id": "msg-init", "status": "sent", "message_text": "test",
+            }
             mock_msgr_cls.return_value = messenger
 
             resp = client.post("/webhook/kommo", json=_make_webhook_payload(lead_id=99))
@@ -664,6 +677,7 @@ class TestFullLifecycle:
         msg = get_message_by_id(msg_id)
         assert msg["attempts"] == 1
         assert msg["status"] == "sent"
+        assert msg["line"] == "berater_accepted"
 
         # Step 2: Simulate 24h passing → cron retry 1
         past_retry = (datetime(2026, 2, 25, 9, 0, 0, tzinfo=timezone.utc)).isoformat(timespec="seconds")
@@ -730,13 +744,13 @@ class TestFullLifecycle:
 
 
 class TestGosniki:
-    """Verify Госники pipeline works correctly."""
+    """Verify Госники pipeline (S02) works correctly."""
 
     @freeze_time("2026-02-25 10:00:00", tz_offset=0)
-    def test_gosniki_first_line(self, client, _temp_db):
+    def test_gosniki_consultation_done(self, client, _temp_db):
         lead = _make_lead(lead_id=101, contact_id=600, pipeline_id=GOSNIKI_PIPELINE,
-                          status_id=GOSNIKI_FIRST_STATUS)
-        contact = _make_contact(contact_id=600, phone="+491761234567")
+                          status_id=GOSNIKI_STATUS)
+        contact = _make_contact(contact_id=600, phone="+491761234567", name="Карим Ахметов")
 
         with patch("server.app.get_kommo_client") as mock_kommo_cls, \
              patch("server.app.get_messenger") as mock_msgr_cls, \
@@ -745,15 +759,18 @@ class TestGosniki:
             kommo = MagicMock()
             kommo.get_lead_contact.return_value = (lead, contact)
             kommo.extract_phone.return_value = "+491761234567"
-            kommo.extract_termin_date.side_effect = lambda ld, fid: "26.02.2026" if fid == 885996 else None
+            kommo.extract_name.return_value = "Карим Ахметов"
+            kommo.extract_termin_date.return_value = None
             mock_kommo_cls.return_value = kommo
 
             messenger = MagicMock()
-            messenger.build_message_text.return_value = "test"
-            messenger.send_message.return_value = {"message_id": "gos-001", "status": "sent", "message_text": "test"}
+            messenger.build_message_text.return_value = "[template] Карим Ахметов"
+            messenger.send_message.return_value = {
+                "message_id": "gos-001", "status": "sent", "message_text": "test",
+            }
             mock_msgr_cls.return_value = messenger
 
-            payload = _make_webhook_payload(lead_id=101, status_id=GOSNIKI_FIRST_STATUS,
+            payload = _make_webhook_payload(lead_id=101, status_id=GOSNIKI_STATUS,
                                             pipeline_id=GOSNIKI_PIPELINE)
             resp = client.post("/webhook/kommo", json=payload)
 
@@ -761,5 +778,6 @@ class TestGosniki:
         result = resp.json()["results"][0]
         msg_id = result["message_id"]
         msg = get_message_by_id(msg_id)
-        assert msg["line"] == "first"
+        assert msg["line"] == "gosniki_consultation_done"
         assert msg["status"] == "sent"
+        assert msg["template_values"] == json.dumps(["Карим Ахметов"])

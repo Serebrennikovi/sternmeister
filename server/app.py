@@ -12,10 +12,10 @@ from fastapi.responses import JSONResponse
 from server.alerts import get_alerter
 from server.config import (
     DEDUP_WINDOW_MINUTES, FIELD_IDS, KOMMO_WEBHOOK_SECRET,
-    RETRY_INTERVAL_HOURS, SEND_WINDOW_START, SEND_WINDOW_END,
-    determine_line,
+    PHONE_WHITELIST, RETRY_INTERVAL_HOURS, SEND_WINDOW_START,
+    SEND_WINDOW_END, determine_line,
 )
-from server.db import create_message, get_recent_message, init_db
+from server.db import create_message, get_failed_temporal_count, get_recent_message, init_db
 from server.kommo import KommoAPIError, get_kommo_client
 from server.messenger import MessageData, MessengerError, get_messenger
 from server.utils import (
@@ -30,6 +30,10 @@ _TERMIN_FIELD_IDS = (
     FIELD_IDS["date_termin_dc"],
     FIELD_IDS["date_termin_aa"],
 )
+
+# Lines where termin_date is optional (шаблон не использует дату как переменную),
+# но name является обязательным ({{1}}=имя в шаблоне).
+_TERMIN_OPTIONAL_LINES = {"gosniki_consultation_done", "berater_accepted"}
 
 
 @asynccontextmanager
@@ -49,12 +53,14 @@ async def health_check():
     """Health check endpoint."""
     now_utc = datetime.now(tz=timezone.utc)
     now_berlin = now_utc.astimezone(_BERLIN_TZ)
+    failed_temporal = get_failed_temporal_count()
     return JSONResponse({
         "status": "ok",
         "send_window": f"{SEND_WINDOW_START}-{SEND_WINDOW_END}",
         "in_window": is_in_send_window(),
         "server_time_utc": now_utc.strftime("%Y-%m-%d %H:%M:%S"),
         "server_time_berlin": now_berlin.strftime("%Y-%m-%d %H:%M:%S"),
+        "failed_temporal": failed_temporal,
     })
 
 
@@ -203,26 +209,49 @@ def _process_lead_status_inner(lead_status: dict) -> dict:
         )
         return {"status": "error", "message": "Phone not found in contact"}
 
+    # 4b. Phone whitelist check (testing mode)
+    if PHONE_WHITELIST and phone not in PHONE_WHITELIST:
+        logger.info("Phone %s not in whitelist, skipping lead %d", phone, lead_id)
+        return {"status": "ok", "message": "Phone not in whitelist (test mode)"}
+
     # 5. Extract termin date (try all date fields).
-    # Business rule: termin_date is required for the WABA template
-    # ("Напоминаем о {{2}} в {{3}}").  If the date is not set in CRM
-    # yet (e.g. manager moved the lead before filling in the date),
-    # we skip — the manager should set the date first.  A subsequent
-    # status change webhook will re-trigger the notification.
+    # For lines in _TERMIN_OPTIONAL_LINES: date is optional (template doesn't use it),
+    # continue with "" if not found.
+    # For other lines: date is required; skip with error if not found.
     termin_date = None
     for fid in _TERMIN_FIELD_IDS:
         termin_date = kommo.extract_termin_date(lead, fid)
         if termin_date:
             break
     if not termin_date:
-        logger.warning("No termin date for lead %d, cannot send notification", lead_id)
-        get_alerter().send_alert(
-            f"Дата термина не найдена для lead {lead_id}", level="WARNING",
-        )
-        return {"status": "error", "message": "Termin date not found in lead"}
+        if line in _TERMIN_OPTIONAL_LINES:
+            termin_date = ""  # Template doesn't use date; proceed
+        else:
+            logger.warning("No termin date for lead %d, cannot send notification", lead_id)
+            get_alerter().send_alert(
+                f"Дата термина не найдена для lead {lead_id}", level="WARNING",
+            )
+            return {"status": "error", "message": "Termin date not found in lead"}
+
+    # 5b. For Г1/Б1: extract client name ({{1}} in template — required).
+    name = None
+    template_values_json = None
+    if line in _TERMIN_OPTIONAL_LINES:
+        name = kommo.extract_name(contact)
+        if name is None:
+            logger.warning(
+                "Name not found for lead %d, cannot send notification (line=%s)",
+                lead_id, line,
+            )
+            get_alerter().send_alert(
+                f"Имя клиента не найдено для lead {lead_id} (line={line})",
+                level="WARNING",
+            )
+            return {"status": "error", "message": "Name not found in contact"}
+        template_values_json = json.dumps([name])
 
     # 6. Build message
-    message_data = MessageData(line=line, termin_date=termin_date)
+    message_data = MessageData(line=line, termin_date=termin_date, name=name)
     messenger = get_messenger()
     message_text = messenger.build_message_text(message_data)
 
@@ -239,6 +268,7 @@ def _process_lead_status_inner(lead_status: dict) -> dict:
             status="pending",
             attempts=0,
             next_retry_at=next_retry_at,
+            template_values=template_values_json,
         )
         logger.info(
             "Outside send window, scheduled msg %d for %s", msg_id, next_retry_at,
@@ -257,8 +287,6 @@ def _process_lead_status_inner(lead_status: dict) -> dict:
         logger.error("Messenger error for lead %d: %s", lead_id, exc)
         get_alerter().alert_messenger_error(phone, str(exc))
         # Save as failed with next_retry_at so T08 cron can retry later.
-        # Use same RETRY_INTERVAL_HOURS as sent messages; cron will
-        # check send window before actual re-send.
         now = datetime.now(tz=timezone.utc)
         next_retry_at = (
             now + timedelta(hours=RETRY_INTERVAL_HOURS)
@@ -272,6 +300,7 @@ def _process_lead_status_inner(lead_status: dict) -> dict:
             message_text=message_text,
             status="failed",
             next_retry_at=next_retry_at,
+            template_values=template_values_json,
         )
         return {"status": "error", "message": f"Messenger error: {exc}"}
 
@@ -293,6 +322,7 @@ def _process_lead_status_inner(lead_status: dict) -> dict:
         sent_at=sent_at,
         next_retry_at=next_retry_at,
         messenger_id=result["message_id"],
+        template_values=template_values_json,
     )
 
     # 10. Add note to Kommo (non-critical)

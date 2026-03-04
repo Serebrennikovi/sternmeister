@@ -1,8 +1,8 @@
 # Архитектура: WhatsApp авто-нотификации
 
-**Версия:** 1.0
-**Дата:** 2026-02-20
-**Статус:** draft
+**Версия:** 1.1
+**Дата:** 2026-03-04
+**Статус:** active
 
 ---
 
@@ -75,8 +75,13 @@ class WazzupMessenger:
 
 @dataclass
 class MessageData:
-    line: str           # "first" или "second"
-    termin_date: str    # "25.02.2026" (DD.MM.YYYY)
+    line: str               # S01: "first"/"second"; S02: "gosniki_consultation_done", "berater_accepted", "berater_day_minus_*", "berater_day_0"
+    termin_date: str        # "25.02.2026" (DD.MM.YYYY); "" допустимо для Г1/Б1
+    # S02 (optional):
+    name: str | None = None
+    institution: str | None = None  # "Jobcenter" / "Agentur für Arbeit"
+    weekday: str | None = None
+    date: str | None = None
 ```
 
 Единственная реализация — `WazzupMessenger`. Абстракция `BaseMessenger` не создаётся (YAGNI — один backend). При необходимости добавить другой канал — выделить интерфейс.
@@ -97,7 +102,7 @@ class MessageData:
 | kommo_lead_id | INTEGER | ID сделки (лида) в Kommo |
 | kommo_contact_id | INTEGER | ID контакта в Kommo |
 | phone | TEXT | Номер телефона |
-| line | TEXT | "first" / "second" |
+| line | TEXT | S01: "first" / "second"; S02: "gosniki_consultation_done" / "berater_accepted" / "berater_day_minus_7" / "berater_day_minus_3" / "berater_day_minus_1" / "berater_day_0" |
 | termin_date | TEXT | Дата термина (DD.MM.YYYY) |
 | message_text | TEXT | Текст отправленного сообщения |
 | status | TEXT | "sent" / "delivered" / "failed" / "pending" |
@@ -116,21 +121,21 @@ class MessageData:
 
 **Воронки и этапы:**
 
-**Воронка "Берётар" (pipeline_id: 12154099):**
-- "Принято от первой линии" — status_id: 9386032 (триггер: first line)
+**Воронка "Бух Бератер" (pipeline_id: 12154099):**
+- "Принято от первой линии" — status_id: 93860331 (S01: триггер first line; S02: триггер berater_accepted)
 - "Принято от первой линии (повторные)" — status_id: 93860327
 - "Новый лид" — status_id: 83873491
 - "Взято в работу" — status_id: 90367079
 - "Недозвон" — status_id: 90367083
 - "Контакт установлен" — status_id: 90367087
-- "Консультация проведена" — status_id: 95514983
 - "Отложенный старт" — status_id: 95514987
 - "Термин ДЦ" — status_id: 10093587 (триггер: second line)
 - "Закрыто и не реализовано" — status_id: 10093590
 - "Терминарий" — status_id: 142
 - "Закрыто и не реализовано" — status_id: 143
 
-**Воронка "Госники" (pipeline_id: 10631243):**
+**Воронка "Бух Гос" (pipeline_id: 10935879):** ← S02: актуальный pipeline_id (старый 10631243 = "Бух Комм", не наш scope)
+- "Консультация проведена" — status_id: 95514983 (S02: триггер gosniki_consultation_done; верифицировано из Kommo API 03.03.2026)
 - "Принято от первой линии" — status_id: 8152349
 - "Не предварительного согласования" — status_id: 81523499 (редактируемый)
 - "Редозвон" — status_id: 83364011
@@ -164,9 +169,11 @@ class MessageData:
 - POST на `https://<server>/webhook/kommo`
 
 **Исходящие запросы (Kommo API v4):**
+- **Base URL:** `https://sternmeister.kommo.com/api/v4` (НЕ `api-c.kommo.com` — домен `api-c` возвращает 401 "Account not found", ходить только через субдомен аккаунта)
 - `GET /api/v4/contacts/{id}` — получить контакт (телефон, имя)
+- `GET /api/v4/leads/pipelines` — получить воронки и этапы (status_id)
 - `POST /api/v4/contacts/{id}/notes` — записать примечание "сообщение отправлено"
-- Авторизация: OAuth 2.0 (long-lived token)
+- Авторизация: OAuth 2.0 (long-lived token), header `Authorization: Bearer {KOMMO_TOKEN}`
 
 ### Wazzup24 WABA
 
@@ -178,11 +185,54 @@ class MessageData:
 - **Тип транспорта:** `wapi` (WhatsApp Business API)
 - **Статус:** `active`
 
-**Доступные WABA шаблоны:**
-1. **"Напоминание о записи или встрече"** (templateGuid: `38194e93-e926-4826-babe-19032e0bd74c`) — ⭐ рекомендуется
-2. **"Уведомление о записи"** (templateGuid: `3b7211aa-6fbd-4b60-bb96-02d7cc837c73`)
-3. **"Универсальный шаблон 4"** (templateGuid: `4e049e0c-c404-45ba-b516-5ae932260b19`) — для произвольного текста
-4. + ещё 6 одобренных шаблонов (см. README.md)
+**Доступные WABA шаблоны (9 одобренных):**
+
+1. **"Напоминание о записи или встрече"** ⭐ используется
+   - templateGuid: `38194e93-e926-4826-babe-19032e0bd74c`
+   - Категория: UTILITY
+   - Текст: "Здравствуйте. Это {{1}}. Напоминаем о {{2}} в {{3}}. Скажите, все в силе?"
+   - Кнопки: "Да, буду вовремя" / "Нет, не могу прийти"
+
+2. **"Уведомление о записи"**
+   - templateGuid: `3b7211aa-6fbd-4b60-bb96-02d7cc837c73`
+   - Категория: UTILITY
+   - Текст: "Здравствуйте. Это {{1}}. Вы записаны на {{2}}. Дата и время: {{3}}. Будем ждать вас {{4}}."
+
+3. **"Напоминание об оплате"**
+   - templateGuid: `9c5e1776-b2fd-42ff-88aa-d128107daa01`
+   - Категория: UTILITY
+   - Текст: "Здравствуйте. Это {{1}}. Напоминаем, что до {{2}} нужно внести {{3}} в размере {{4}} за {{5}}."
+
+4. **"Информация о заказе"**
+   - templateGuid: `89155c52-758e-473a-9e44-dcdc086d206a`
+   - Категория: UTILITY
+   - Текст: "Здравствуйте. Это {{1}}. По вашему заказу {{2}} есть новости: {{3}}."
+
+5. **"Новости и предложения для клиента"**
+   - templateGuid: `16a476d9-a406-41c0-9fcf-706194ff053e`
+   - Категория: MARKETING
+   - Текст: "Здравствуйте. Это {{1}}. Ранее общались по поводу {{2}}. У нас есть новости: {{3}}."
+
+6. **"Термин_"**
+   - templateGuid: `e5952102-0e55-434e-a262-78a555385456`
+   - Категория: MARKETING
+   - Текст: "В продолжение диалога направляю Вам окончательную версию мотивационного письма {{1}} и памятку о порядке дальнейших действий для назначения и успешного прохождения термина с бератером."
+   - Кнопка: "Памятка"
+
+7. **"А1"**
+   - templateGuid: `0105fd1a-f7f9-47ac-908c-93595b263e30`
+   - Категория: MARKETING
+   - Текст: "Приветствуем,{{1}}! На связи SternMeister 🚀 Мы внимательно изучили вашу анкету и увидели, что ваш уровень немецкого не подходит под критерии программы и гос. финансирования. Будем рады вас видеть среди наших студентов, когда ваш уровень немецкого будет A2+. Хорошего вам дня!"
+
+8. **"Универсальный шаблон 4"**
+   - templateGuid: `4e049e0c-c404-45ba-b516-5ae932260b19`
+   - Категория: MARKETING
+   - Текст: "ㅤ {{1}}ㅤ ㅤ ㅤ ㅤ" (пустой шаблон)
+
+9. **"Универсальный шаблон 2"**
+   - templateGuid: `d7ed72e6-c1fe-4f5b-970a-deb2ffff0af0`
+   - Категория: MARKETING
+   - Текст: "ㅤ {{1}} ㅤ ㅤ ㅤㅤ" (пустой шаблон)
 
 **API методы (v3):**
 ```bash
@@ -261,7 +311,7 @@ docker run -d --name whatsapp-notifications \
 ### Systemd
 
 - `ngrok-whatsapp.service` — ngrok tunnel (auto-restart)
-- `whatsapp-cron.timer` — cron каждый час (process_retries + process_pending)
+- `whatsapp-cron.timer` — cron каждый час (process_retries + process_pending + process_temporal_triggers [S02])
 
 ### Переменные окружения
 

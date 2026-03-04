@@ -1,7 +1,8 @@
+import dataclasses
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import requests
 
@@ -13,7 +14,13 @@ MAX_RETRIES = 3
 _429_RETRY_DELAY = 1  # seconds between 429 retries
 _5XX_RETRY_DELAY = 1  # seconds between 5xx retries
 
-_VALID_LINES = frozenset({"first", "second"})
+# All valid line values — must match TEMPLATE_MAP keys in config.py
+_VALID_LINES = frozenset({
+    "first", "second",
+    "gosniki_consultation_done", "berater_accepted",
+    "berater_day_minus_7", "berater_day_minus_3",
+    "berater_day_minus_1", "berater_day_0",
+})
 
 
 class MessengerError(Exception):
@@ -23,20 +30,18 @@ class MessengerError(Exception):
 @dataclass
 class MessageData:
     """Данные для формирования сообщения."""
-    line: str           # "first" или "second"
-    termin_date: str    # "25.02.2026" (DD.MM.YYYY из kommo.extract_termin_date)
+    line: str           # одно из значений _VALID_LINES
+    termin_date: str    # "25.02.2026" (DD.MM.YYYY) или "" для Г1/Б1
+    name: str | None = field(default=None)          # имя клиента ({{1}} в S02-шаблонах)
+    institution: str | None = field(default=None)   # "Jobcenter" / "Agentur für Arbeit"
+    weekday: str | None = field(default=None)       # "Понедельник", "Вторник", ...
+    date: str | None = field(default=None)          # дата термина для шаблона "DD.MM.YYYY"
 
     def __post_init__(self):
         if self.line not in _VALID_LINES:
             raise ValueError(f"Invalid line: {self.line!r}, expected one of {_VALID_LINES}")
-        if not self.termin_date:
-            raise ValueError("termin_date must not be empty")
-
-
-_TEMPLATE_TEXT = (
-    "Здравствуйте. Это {company}. "
-    "Напоминаем о {event} в {date}. Скажите, все в силе?"
-)
+        # termin_date="" is allowed for lines where date is optional (gosniki_consultation_done,
+        # berater_accepted). Non-empty check is enforced by S01 lines in app.py logic.
 
 
 class WazzupMessenger:
@@ -52,7 +57,6 @@ class WazzupMessenger:
 
         self.channel_id = config.WAZZUP_CHANNEL_ID
         self.base_url = config.WAZZUP_API_URL
-        self.template_id = config.WAZZUP_TEMPLATE_ID
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Bearer {config.WAZZUP_API_KEY}",
@@ -63,24 +67,28 @@ class WazzupMessenger:
         """Оставить только цифры: +491234567890 -> 491234567890."""
         return "".join(c for c in phone if c.isdigit())
 
-    def _build_template_values(self, message_data: MessageData) -> list[str]:
+    def build_message_text(
+        self,
+        message_data: MessageData,
+        template_values: list | None = None,
+    ) -> str:
+        """Return the human-readable message text (for DB logging).
+
+        S01 lines: full template text.
+        S02 lines: "[template] var1, var2, ..."  (exact template text unavailable).
+        berater_day_minus_7 (заглушка): "[berater_day_minus_7] (placeholder)".
+
+        Pass pre-computed ``template_values`` (from send_message) to avoid
+        calling vars_fn twice on the same send.
         """
-        Построить значения переменных для WABA-шаблона.
-
-        Шаблон "Напоминание о записи или встрече":
-        "Здравствуйте. Это {{1}}. Напоминаем о {{2}} в {{3}}. Скажите, все в силе?"
-
-        Returns:
-            ["SternMeister", "записи на термин", "25.02.2026"]
-        """
-        company = "SternMeister"
-        event = "записи на термин" if message_data.line == "first" else "термине"
-        return [company, event, message_data.termin_date]
-
-    def build_message_text(self, message_data: MessageData) -> str:
-        """Return the human-readable message text (for DB logging)."""
-        vals = self._build_template_values(message_data)
-        return _TEMPLATE_TEXT.format(company=vals[0], event=vals[1], date=vals[2])
+        from server.config import TEMPLATE_MAP
+        if template_values is None:
+            entry = TEMPLATE_MAP.get(message_data.line, {})
+            vars_fn = entry.get("vars")
+            if vars_fn is None:
+                return f"[{message_data.line}] (placeholder)"
+            template_values = vars_fn(**dataclasses.asdict(message_data))
+        return f"[template] {', '.join(str(v) for v in template_values)}"
 
     def send_message(self, phone: str, message_data: MessageData) -> dict:
         """
@@ -88,10 +96,11 @@ class WazzupMessenger:
 
         Args:
             phone: номер в формате +491234567890
-            message_data: параметры шаблона (line, termin_date)
+            message_data: параметры шаблона
 
         Returns:
             {"message_id": "...", "status": "sent", "message_text": "..."}
+            или {"status": "skipped"} если template_guid is None (заглушка Б2).
 
         Raises:
             MessengerError: при любой ошибке отправки
@@ -99,21 +108,36 @@ class WazzupMessenger:
         Note:
             Wazzup24 возвращает 201 Created при успешной отправке.
         """
+        from server.config import TEMPLATE_MAP
+
+        entry = TEMPLATE_MAP[message_data.line]
+        template_guid = entry["template_guid"]
+        vars_fn = entry["vars"]
+
+        # Заглушка (berater_day_minus_7): шаблон не прошёл WABA → пропустить
+        if template_guid is None:
+            logger.info(
+                "Template for line=%s is placeholder (no GUID), skipping. "
+                "termin_date=%s",
+                message_data.line, message_data.termin_date,
+            )
+            return {"status": "skipped"}
+
         url = f"{self.base_url}/message"
         chat_id = self._format_chat_id(phone)
-        template_values = self._build_template_values(message_data)
-        message_text = self.build_message_text(message_data)
+        template_values = vars_fn(**dataclasses.asdict(message_data))
+        message_text = self.build_message_text(message_data, template_values=template_values)
 
         payload = {
             "channelId": self.channel_id,
             "chatId": chat_id,
             "chatType": "whatsapp",
-            "templateId": self.template_id,
+            "templateId": template_guid,
             "templateValues": template_values,
         }
 
         masked = mask_phone(phone)
-        logger.info("Sending WhatsApp to %s via Wazzup24", masked)
+        logger.info("Sending WhatsApp to %s via Wazzup24 (line=%s)", masked, message_data.line)
 
         resp = self._request_with_retry(url, payload)
 

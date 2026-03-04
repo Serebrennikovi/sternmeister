@@ -4,12 +4,13 @@ Run:  python -m server.cron
 Schedule: every hour via systemd timer or crontab.
 """
 
+import json
 import logging
 import sys
 from datetime import datetime, timedelta, timezone
 
 from server.alerts import get_alerter
-from server.config import MAX_RETRY_ATTEMPTS, RETRY_INTERVAL_HOURS
+from server.config import MAX_RETRY_ATTEMPTS, PHONE_WHITELIST, RETRY_INTERVAL_HOURS
 from server.db import (
     get_messages_for_retry,
     get_pending_messages,
@@ -34,6 +35,20 @@ def _add_kommo_note(lead_id: int, line: str, note_type: str) -> None:
         )
     except KommoAPIError as exc:
         logger.warning("Failed to add note to lead %d: %s", lead_id, exc)
+
+
+def _build_message_data(msg) -> MessageData:
+    """Restore MessageData from a DB row, including S02 template_values if present."""
+    extra = {}
+    try:
+        tv = msg["template_values"]
+    except IndexError:
+        tv = None
+    if tv:
+        vals = json.loads(tv)
+        keys = ("name", "institution", "weekday", "date")
+        extra = dict(zip(keys, vals))
+    return MessageData(line=msg["line"], termin_date=msg["termin_date"], **extra)
 
 
 def process_retries() -> tuple[int, int]:
@@ -63,13 +78,16 @@ def process_retries() -> tuple[int, int]:
 
     for msg in messages:
         msg_id = msg["id"]
+        if PHONE_WHITELIST and msg["phone"] not in PHONE_WHITELIST:
+            logger.info("Retry skip msg %d: phone not in whitelist", msg_id)
+            continue
         new_attempts = msg["attempts"] + 1
         logger.info(
             "Retrying msg %d (attempt %d/%d)", msg_id, new_attempts, max_attempts,
         )
 
         try:
-            message_data = MessageData(line=msg["line"], termin_date=msg["termin_date"])
+            message_data = _build_message_data(msg)
             result = messenger.send_message(msg["phone"], message_data)
         except (MessengerError, ValueError) as exc:
             logger.error("Retry failed for msg %d: %s", msg_id, exc)
@@ -82,6 +100,11 @@ def process_retries() -> tuple[int, int]:
                 next_retry_at=next_retry,
             )
             failed += 1
+            continue
+
+        # Placeholder template (e.g. berater_day_minus_7): no message sent, no DB update.
+        if result.get("status") == "skipped":
+            logger.info("Retry skipped msg %d (line=%s, placeholder template)", msg_id, msg["line"])
             continue
 
         now = datetime.now(tz=timezone.utc)
@@ -139,10 +162,13 @@ def process_pending() -> tuple[int, int]:
 
     for msg in messages:
         msg_id = msg["id"]
+        if PHONE_WHITELIST and msg["phone"] not in PHONE_WHITELIST:
+            logger.info("Pending skip msg %d: phone not in whitelist", msg_id)
+            continue
         logger.info("Sending pending msg %d", msg_id)
 
         try:
-            message_data = MessageData(line=msg["line"], termin_date=msg["termin_date"])
+            message_data = _build_message_data(msg)
             result = messenger.send_message(msg["phone"], message_data)
         except (MessengerError, ValueError) as exc:
             logger.error("Pending send failed for msg %d: %s", msg_id, exc)
@@ -163,6 +189,11 @@ def process_pending() -> tuple[int, int]:
                     msg_id, attempts=new_attempts, next_retry_at=next_try,
                 )
             failed += 1
+            continue
+
+        # Placeholder template (e.g. berater_day_minus_7): no message sent, no DB update.
+        if result.get("status") == "skipped":
+            logger.info("Pending skipped msg %d (line=%s, placeholder template)", msg_id, msg["line"])
             continue
 
         now = datetime.now(tz=timezone.utc)

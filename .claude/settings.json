@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "hetzner-prod": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-ssh",
+        "ssh://root@65.108.154.202"
+      ],
+      "env": {
+        "SSH_PRIVATE_KEY_PATH": "/Users/is/.ssh/max_server"
+      }
+    }
+  }
+}

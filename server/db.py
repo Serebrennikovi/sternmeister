@@ -7,17 +7,25 @@ from server.config import DATABASE_PATH, MAX_RETRY_ATTEMPTS
 _ALLOWED_COLUMNS = frozenset({
     "kommo_contact_id", "kommo_lead_id", "phone", "line", "termin_date",
     "message_text", "status", "attempts", "sent_at", "next_retry_at",
-    "messenger_id", "messenger_backend",
+    "messenger_id", "messenger_backend", "template_values",
 })
 
+# Full S02 schema — used for fresh installs.
+# Existing S01 databases are upgraded via migrate_db().
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     kommo_lead_id INTEGER NOT NULL,
     kommo_contact_id INTEGER NOT NULL,
     phone TEXT NOT NULL,
-    line TEXT NOT NULL CHECK(line IN ('first', 'second')),
+    line TEXT NOT NULL CHECK(line IN (
+        'first', 'second',
+        'gosniki_consultation_done', 'berater_accepted',
+        'berater_day_minus_7', 'berater_day_minus_3',
+        'berater_day_minus_1', 'berater_day_0'
+    )),
     termin_date TEXT NOT NULL,
+    template_values TEXT,
     message_text TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'sent', 'delivered', 'failed')),
     attempts INTEGER NOT NULL DEFAULT 1,
@@ -33,6 +41,12 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_status_next_retry ON messages (status, next_retry_at);",
     "CREATE INDEX IF NOT EXISTS idx_kommo_contact ON messages (kommo_contact_id);",
     "CREATE INDEX IF NOT EXISTS idx_dedup ON messages (kommo_lead_id, line, created_at);",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_dedup_temporal
+    ON messages(kommo_lead_id, line, termin_date)
+    WHERE line IN (
+        'berater_day_minus_7', 'berater_day_minus_3',
+        'berater_day_minus_1', 'berater_day_0'
+    );""",
 ]
 
 
@@ -60,8 +74,79 @@ def now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
 
+def migrate_db() -> None:
+    """Migrate S01 schema to S02: expand CHECK constraint, add template_values.
+
+    Idempotent: checks if template_values column already exists.
+    Uses isolation_level=None (autocommit mode) so that explicit
+    BEGIN IMMEDIATE / COMMIT control DDL operations atomically —
+    Python's default isolation_level auto-commits before each DDL statement,
+    breaking a normal BEGIN/COMMIT wrapper.
+    """
+    conn = sqlite3.connect(DATABASE_PATH, timeout=10, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
+    try:
+        # Idempotency check: if template_values already exists, migration done.
+        cursor = conn.execute("PRAGMA table_info(messages)")
+        cols = [row[1] for row in cursor.fetchall()]
+        if "template_values" in cols:
+            return
+
+        conn.execute("BEGIN IMMEDIATE")
+        # Clean up any leftover messages_new from a previously interrupted migration.
+        conn.execute("DROP TABLE IF EXISTS messages_new")
+        conn.execute("""
+        CREATE TABLE messages_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            kommo_lead_id INTEGER NOT NULL,
+            kommo_contact_id INTEGER NOT NULL,
+            phone TEXT NOT NULL,
+            line TEXT NOT NULL CHECK(line IN (
+                'first', 'second',
+                'gosniki_consultation_done', 'berater_accepted',
+                'berater_day_minus_7', 'berater_day_minus_3',
+                'berater_day_minus_1', 'berater_day_0'
+            )),
+            termin_date TEXT NOT NULL,
+            template_values TEXT,
+            message_text TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'sent', 'delivered', 'failed')),
+            attempts INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            sent_at TEXT,
+            next_retry_at TEXT,
+            messenger_id TEXT,
+            messenger_backend TEXT NOT NULL DEFAULT 'wazzup'
+        )
+        """)
+        conn.execute("""
+            INSERT INTO messages_new
+                (id, kommo_lead_id, kommo_contact_id, phone, line, termin_date,
+                 template_values, message_text, status, attempts, created_at,
+                 sent_at, next_retry_at, messenger_id, messenger_backend)
+            SELECT
+                id, kommo_lead_id, kommo_contact_id, phone, line, termin_date,
+                NULL, message_text, status, attempts, created_at,
+                sent_at, next_retry_at, messenger_id, messenger_backend
+            FROM messages
+        """)
+        conn.execute("DROP TABLE messages")
+        conn.execute("ALTER TABLE messages_new RENAME TO messages")
+        # Recreate indexes
+        for idx_sql in _CREATE_INDEXES:
+            conn.execute(idx_sql)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+
 def init_db() -> None:
-    """Create messages table and indexes if they don't exist."""
+    """Create messages table and indexes if they don't exist, then migrate."""
     db_dir = Path(DATABASE_PATH).parent
     if db_dir != Path("."):
         db_dir.mkdir(parents=True, exist_ok=True)
@@ -74,6 +159,7 @@ def init_db() -> None:
         conn.commit()
     finally:
         conn.close()
+    migrate_db()
 
 
 def create_message(
@@ -90,6 +176,7 @@ def create_message(
     next_retry_at: str | None = None,
     messenger_id: str | None = None,
     messenger_backend: str = "wazzup",
+    template_values: str | None = None,
 ) -> int:
     """Insert a new message record. Returns the row id."""
     conn = _get_conn()
@@ -98,9 +185,9 @@ def create_message(
             """
             INSERT INTO messages
                 (kommo_lead_id, kommo_contact_id, phone, line,
-                 termin_date, message_text, status, attempts, created_at,
-                 sent_at, next_retry_at, messenger_id, messenger_backend)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 termin_date, template_values, message_text, status, attempts,
+                 created_at, sent_at, next_retry_at, messenger_id, messenger_backend)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 kommo_lead_id,
@@ -108,6 +195,7 @@ def create_message(
                 phone,
                 line,
                 termin_date,
+                template_values,
                 message_text,
                 status,
                 attempts,
@@ -245,5 +333,24 @@ def get_pending_messages(at: str | None = None) -> list[sqlite3.Row]:
             """,
             (at,),
         ).fetchall()
+    finally:
+        conn.close()
+
+
+def get_failed_temporal_count() -> int:
+    """Count failed messages for temporal lines (for /health endpoint)."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) FROM messages
+            WHERE status = 'failed'
+              AND line IN (
+                  'berater_day_minus_7', 'berater_day_minus_3',
+                  'berater_day_minus_1', 'berater_day_0'
+              )
+            """
+        ).fetchone()
+        return row[0] if row else 0
     finally:
         conn.close()

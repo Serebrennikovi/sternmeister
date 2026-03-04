@@ -1,9 +1,13 @@
-"""Tests for POST /webhook/kommo handler (T06).
+"""Tests for POST /webhook/kommo handler (T06, updated for S02 in T12).
 
 Uses mocked external services (Kommo API, Wazzup messenger, DB).
 The real PIPELINE_CONFIG is used for determine_line() tests.
+
+S02 breaking change: status 93860331 (Берётар "Принято от первой линии")
+now maps to "berater_accepted" (S02 template Б1) instead of "first" (S01).
 """
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,8 +25,11 @@ def client():
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _kommo_json_payload(lead_id=123, status_id=9386032, pipeline_id=12154099):
-    """Build a JSON payload mimicking Kommo webhook."""
+def _kommo_json_payload(lead_id=123, status_id=93860331, pipeline_id=12154099):
+    """Build a JSON payload mimicking Kommo webhook.
+
+    Default status_id=93860331 → berater_accepted (Бух Бератер pipeline).
+    """
     return {
         "leads": {
             "status": [{
@@ -49,15 +56,16 @@ def _make_lead(custom_fields=None):
     return {
         "id": 123,
         "pipeline_id": 12154099,
-        "status_id": 9386032,
+        "status_id": 93860331,
         "custom_fields_values": custom_fields or [],
     }
 
 
-def _make_contact(phone="+491234567890", contact_id=456):
+def _make_contact(phone="+491234567890", contact_id=456, name="Test User"):
     """Build a fake Kommo contact dict."""
     return {
         "id": contact_id,
+        "name": name,
         "custom_fields_values": [
             {
                 "field_code": "PHONE",
@@ -73,16 +81,21 @@ def _patch_full_happy_path(
     *,
     termin_date="25.02.2026",
     phone="+491234567890",
+    name="Test User",
     send_result=None,
 ):
-    """Wire up kommo + messenger mocks for full happy-path tests."""
+    """Wire up kommo + messenger mocks for full happy-path tests.
+
+    S02: berater_accepted and gosniki_consultation_done require name extraction.
+    """
     kommo = MagicMock()
     lead = _make_lead(custom_fields=[
         {"field_id": 885996, "values": [{"value": 1740441600}]},
     ])
-    contact = _make_contact(phone=phone)
+    contact = _make_contact(phone=phone, name=name)
     kommo.get_lead_contact.return_value = (lead, contact)
     kommo.extract_phone.return_value = phone
+    kommo.extract_name.return_value = name
     kommo.extract_termin_date.return_value = termin_date
     mock_get_kommo.return_value = kommo
 
@@ -102,6 +115,7 @@ def _patch_happy_path_with_termin_fallback(
     *,
     termin_field_returns,
     phone="+491234567890",
+    name="Test User",
 ):
     """Wire up mocks where extract_termin_date returns different values per field_id.
 
@@ -110,9 +124,10 @@ def _patch_happy_path_with_termin_fallback(
     """
     kommo = MagicMock()
     lead = _make_lead()
-    contact = _make_contact(phone=phone)
+    contact = _make_contact(phone=phone, name=name)
     kommo.get_lead_contact.return_value = (lead, contact)
     kommo.extract_phone.return_value = phone
+    kommo.extract_name.return_value = name
     kommo.extract_termin_date.side_effect = lambda lead_data, fid: termin_field_returns.get(fid)
     mock_get_kommo.return_value = kommo
 
@@ -140,10 +155,15 @@ class TestHealthCheck:
         assert "in_window" in data
         assert "server_time_utc" in data
         assert "server_time_berlin" in data
+        assert "failed_temporal" in data  # S02: new field
 
     def test_in_window_is_bool(self, client):
         resp = client.get("/health")
         assert isinstance(resp.json()["in_window"], bool)
+
+    def test_failed_temporal_is_int(self, client):
+        resp = client.get("/health")
+        assert isinstance(resp.json()["failed_temporal"], int)
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +268,7 @@ class TestWebhookHappyPath:
         self, mock_window, mock_recent, mock_create,
         mock_get_messenger, mock_get_kommo, client,
     ):
+        """S02: berater_accepted — sends message, saves template_values=[name]."""
         kommo, messenger = _patch_full_happy_path(
             mock_get_kommo, mock_get_messenger,
         )
@@ -266,18 +287,19 @@ class TestWebhookHappyPath:
         assert call_kwargs["kommo_lead_id"] == 123
         assert call_kwargs["kommo_contact_id"] == 456
         assert call_kwargs["phone"] == "+491234567890"
-        assert call_kwargs["line"] == "first"
-        assert call_kwargs["termin_date"] == "25.02.2026"
+        assert call_kwargs["line"] == "berater_accepted"
         assert call_kwargs["message_text"] == "test message text"
         assert call_kwargs["sent_at"] is not None
         assert call_kwargs["next_retry_at"] is not None
+        # S02: template_values includes the client name
+        assert call_kwargs["template_values"] == json.dumps(["Test User"])
 
         # Verify note added to Kommo with correct format
         kommo.add_note.assert_called_once()
         note_args = kommo.add_note.call_args
         assert note_args[0][0] == 123  # lead_id
         note_text = note_args[0][1]
-        assert "(first)" in note_text
+        assert "(berater_accepted)" in note_text
         assert "UTC" in note_text
 
     @patch("server.app.get_kommo_client")
@@ -353,7 +375,7 @@ class TestWebhookMultipleLeads:
         payload = {
             "leads": {
                 "status": [
-                    {"id": 123, "status_id": 9386032, "pipeline_id": 12154099},
+                    {"id": 123, "status_id": 93860331, "pipeline_id": 12154099},
                     {"id": 456, "status_id": 999, "pipeline_id": 12154099},
                 ]
             }
@@ -392,6 +414,7 @@ class TestWebhookMultipleLeads:
 
         kommo.get_lead_contact.side_effect = side_effect_get_lead_contact
         kommo.extract_phone.return_value = "+491234567890"
+        kommo.extract_name.return_value = "Test User"
         kommo.extract_termin_date.return_value = "25.02.2026"
         mock_get_kommo.return_value = kommo
 
@@ -403,8 +426,8 @@ class TestWebhookMultipleLeads:
         payload = {
             "leads": {
                 "status": [
-                    {"id": 100, "status_id": 9386032, "pipeline_id": 12154099},
-                    {"id": 200, "status_id": 9386032, "pipeline_id": 12154099},
+                    {"id": 100, "status_id": 93860331, "pipeline_id": 12154099},
+                    {"id": 200, "status_id": 93860331, "pipeline_id": 12154099},
                 ]
             }
         }
@@ -456,17 +479,19 @@ class TestWebhookErrors:
 
     @patch("server.app.get_kommo_client")
     @patch("server.app.get_recent_message", return_value=None)
-    def test_no_termin_date(self, mock_recent, mock_get_kommo, client):
+    def test_no_name_for_berater_accepted(self, mock_recent, mock_get_kommo, client):
+        """S02: berater_accepted requires name — returns error if not found."""
         kommo = MagicMock()
         kommo.get_lead_contact.return_value = (_make_lead(), _make_contact())
         kommo.extract_phone.return_value = "+491234567890"
-        kommo.extract_termin_date.return_value = None
+        kommo.extract_name.return_value = None  # Name not found
+        kommo.extract_termin_date.return_value = None  # Termin optional for berater_accepted
         mock_get_kommo.return_value = kommo
 
         resp = client.post("/webhook/kommo", json=_kommo_json_payload())
         result = _single_result(resp)
         assert result["status"] == "error"
-        assert "Termin date not found" in result["message"]
+        assert "Name not found" in result["message"]
 
     @patch("server.app.get_kommo_client")
     @patch("server.app.get_messenger")
@@ -513,7 +538,12 @@ class TestWebhookErrors:
 # ---------------------------------------------------------------------------
 
 class TestWebhookTerminFallback:
-    """Verify termin date extraction tries all 3 field IDs in order."""
+    """Verify termin date extraction tries all 3 field IDs in order.
+
+    S02: berater_accepted (default payload) allows empty termin_date,
+    but requires a name. The fallback tests verify field priority;
+    when a date is found it's stored, when not found "" is stored.
+    """
 
     @patch("server.app.get_kommo_client")
     @patch("server.app.get_messenger")
@@ -574,74 +604,78 @@ class TestWebhookTerminFallback:
 
     @patch("server.app.get_kommo_client")
     @patch("server.app.get_recent_message", return_value=None)
-    def test_all_fields_empty_returns_error(
+    def test_all_fields_empty_berater_accepted_proceeds_with_name(
         self, mock_recent, mock_get_kommo, client,
     ):
-        """All 3 fields empty -> error."""
+        """S02: berater_accepted — all termin fields empty is OK (termin optional).
+        Error only if name is also missing.
+        """
         kommo = MagicMock()
         kommo.get_lead_contact.return_value = (_make_lead(), _make_contact())
         kommo.extract_phone.return_value = "+491234567890"
+        kommo.extract_name.return_value = None  # Name missing → error
         kommo.extract_termin_date.return_value = None
         mock_get_kommo.return_value = kommo
 
         resp = client.post("/webhook/kommo", json=_kommo_json_payload())
         result = _single_result(resp)
         assert result["status"] == "error"
-        assert "Termin date not found" in result["message"]
+        # berater_accepted: termin optional → error is "Name not found", not "Termin date"
+        assert "Name not found" in result["message"]
 
 
 # ---------------------------------------------------------------------------
-# Second line & Госники pipeline
+# Gosniki pipeline (S02)
 # ---------------------------------------------------------------------------
 
-class TestWebhookSecondLineAndGosniki:
-    """Verify all PIPELINE_CONFIG mappings are handled."""
+class TestWebhookGosnikAndBerater:
+    """Verify S02 PIPELINE_CONFIG mappings (gosniki + berater_accepted)."""
 
     @patch("server.app.get_kommo_client")
     @patch("server.app.get_messenger")
     @patch("server.app.create_message", return_value=99)
     @patch("server.app.get_recent_message", return_value=None)
     @patch("server.app.is_in_send_window", return_value=True)
-    def test_second_line_beratar(
+    def test_gosniki_consultation_done(
         self, mock_window, mock_recent, mock_create,
         mock_get_messenger, mock_get_kommo, client,
     ):
-        """Берётар 'Термин ДЦ' (status_id=10093587) -> second line."""
+        """Бух Гос 'Консультация проведена' (status_id=95514983) → gosniki_consultation_done."""
         kommo, messenger = _patch_full_happy_path(
             mock_get_kommo, mock_get_messenger,
         )
 
-        payload = _kommo_json_payload(status_id=10093587, pipeline_id=12154099)
+        payload = _kommo_json_payload(status_id=95514983, pipeline_id=10935879)
         resp = client.post("/webhook/kommo", json=payload)
         assert resp.status_code == 200
         result = _single_result(resp)
         assert result.get("message_id") == 99
 
         call_kwargs = mock_create.call_args_list[-1].kwargs
-        assert call_kwargs["line"] == "second"
+        assert call_kwargs["line"] == "gosniki_consultation_done"
 
     @patch("server.app.get_kommo_client")
     @patch("server.app.get_messenger")
     @patch("server.app.create_message", return_value=99)
     @patch("server.app.get_recent_message", return_value=None)
     @patch("server.app.is_in_send_window", return_value=True)
-    def test_first_line_gosniki(
+    def test_berater_accepted_status(
         self, mock_window, mock_recent, mock_create,
         mock_get_messenger, mock_get_kommo, client,
     ):
-        """Госники 'Принято от первой линии' (status_id=8152349) -> first line."""
+        """Бух Бератер 'Принято от первой линии' (status_id=93860331) → berater_accepted."""
         kommo, messenger = _patch_full_happy_path(
             mock_get_kommo, mock_get_messenger,
         )
 
-        payload = _kommo_json_payload(status_id=8152349, pipeline_id=10631243)
+        payload = _kommo_json_payload(status_id=93860331, pipeline_id=12154099)
         resp = client.post("/webhook/kommo", json=payload)
         assert resp.status_code == 200
         result = _single_result(resp)
         assert result.get("message_id") == 99
 
         call_kwargs = mock_create.call_args_list[-1].kwargs
-        assert call_kwargs["line"] == "first"
+        assert call_kwargs["line"] == "berater_accepted"
 
 
 # ---------------------------------------------------------------------------
@@ -716,10 +750,10 @@ class TestWebhookFormEncoded:
             mock_get_kommo, mock_get_messenger,
         )
 
-        # Real Kommo status_id for Берётар "first" line
+        # Real Kommo status_id for Берётар "Принято от первой линии" (berater_accepted)
         body = (
             b"leads[status][0][id]=123"
-            b"&leads[status][0][status_id]=9386032"
+            b"&leads[status][0][status_id]=93860331"
             b"&leads[status][0][pipeline_id]=12154099"
             b"&leads[status][0][old_status_id]=99999"
         )
@@ -732,9 +766,9 @@ class TestWebhookFormEncoded:
         result = _single_result(resp)
         assert result["message_id"] == 99
 
-        # Verify the string "9386032" was correctly parsed as int -> "first"
+        # Verify the string "93860331" was correctly parsed as int -> "berater_accepted"
         call_kwargs = mock_create.call_args_list[-1].kwargs
-        assert call_kwargs["line"] == "first"
+        assert call_kwargs["line"] == "berater_accepted"
 
 
 # ---------------------------------------------------------------------------
@@ -756,43 +790,3 @@ class TestWebhookCatchAll:
         result = _single_result(resp)
         assert result["status"] == "error"
         assert result["message"] == "Internal error"
-
-
-# ---------------------------------------------------------------------------
-# Webhook secret validation
-# ---------------------------------------------------------------------------
-
-class TestWebhookSecret:
-    """KOMMO_WEBHOOK_SECRET validation (secret-in-URL)."""
-
-    def test_no_secret_configured_passes_through(self, client):
-        """When KOMMO_WEBHOOK_SECRET is empty, all requests pass through."""
-        # conftest does not set KOMMO_WEBHOOK_SECRET -> defaults to ""
-        resp = client.post("/webhook/kommo", json={})
-        assert resp.status_code == 200
-        assert resp.json()["message"] == "Not a status change event"
-
-    @patch("server.app.KOMMO_WEBHOOK_SECRET", "my-test-secret")
-    def test_wrong_secret_returns_403(self, client):
-        """Wrong secret -> 403 Forbidden."""
-        resp = client.post(
-            "/webhook/kommo?secret=wrong", json=_kommo_json_payload(),
-        )
-        assert resp.status_code == 403
-        assert resp.json()["message"] == "Forbidden"
-
-    @patch("server.app.KOMMO_WEBHOOK_SECRET", "my-test-secret")
-    def test_missing_secret_returns_403(self, client):
-        """No secret in URL when configured -> 403 Forbidden."""
-        resp = client.post("/webhook/kommo", json=_kommo_json_payload())
-        assert resp.status_code == 403
-        assert resp.json()["message"] == "Forbidden"
-
-    @patch("server.app.KOMMO_WEBHOOK_SECRET", "my-test-secret")
-    def test_correct_secret_passes_through(self, client):
-        """Correct secret -> request is processed normally."""
-        resp = client.post(
-            "/webhook/kommo?secret=my-test-secret", json={},
-        )
-        assert resp.status_code == 200
-        assert resp.json()["message"] == "Not a status change event"

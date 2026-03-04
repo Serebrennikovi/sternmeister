@@ -1,12 +1,40 @@
 # HANDOFF — WhatsApp Auto-notifications (Sternmeister)
 
-**Последнее обновление:** 24.02.2026
+**Последнее обновление:** 04.03.2026 (T12 акцептована)
 
 ---
 
 ## Текущий статус
 
-**Спецификация S01 завершена.** Все задачи T01-T11 выполнены и акцептованы. Сервис работает в продакшне на Hetzner (65.108.154.202) через ngrok (`https://shternmeister.ngrok.pro`). Полный цикл: webhook → Kommo API → проверка окна 9-21 → Wazzup24 → SQLite + cron retry/pending + Telegram алерты. 142 теста (141 pass, 1 skip).
+**S01 завершена, S02 готова к разработке.** Сервис S01 работает в продакшне. Спецификация S02 закрыта, все вопросы решены, задачи декомпозированы.
+
+---
+
+## Активная спецификация
+
+### S02: Расширение системы уведомлений 📋 в работе
+
+Расширение S01: цепочка из 6 WABA-сообщений — 2 webhook + 4 temporal (по дате термина ДЦ и АА).
+
+Файл: [S02_notifications_expansion.md](2.%20specifications/S02_notifications_expansion.md)
+
+**Статус:** Спека закрыта (v2.5, все вопросы решены). Задачи декомпозированы. Готово к разработке.
+
+**Цепочка (финальная):**
+- Г1: webhook "Консультация проведена" (Бух Гос)
+- Б1: webhook "Принято от первой линии" (Бух Бератер)
+- Б2: temporal -7 дней (заглушка — WABA не одобрен, ждём Виктора)
+- Б3: temporal -3 дня
+- Б4: temporal -1 день
+- Б5: temporal в день термина
+
+**Задачи:**
+- [x] T12 — config + schema + webhook/messenger (Г1, Б1): [T12_s02_config_schema_webhook_done.md](3.%20tasks/Done/S02_notifications_expansion_done/T12_s02_config_schema_webhook_done.md) ✅ 205 тестов
+- [ ] T13 — temporal-триггеры (Б3–Б5): [T13_s02_temporal_triggers.md](3.%20tasks/S02_notifications_expansion/T13_s02_temporal_triggers.md) ← требует T12
+- [ ] T14 — деплой S02: [T14_s02_deploy.md](3.%20tasks/S02_notifications_expansion/T14_s02_deploy.md) ← требует T12, T13
+
+**Блокеры:**
+- [ ] WABA-шаблон Б2 "За 7 дней" — переподать Виктору. Не блокирует разработку (код с заглушкой)
 
 ---
 
@@ -77,6 +105,15 @@
 ---
 
 ## История изменений
+
+### 2026-03-04 — T12 акцептована
+- config.py: PIPELINE_CONFIG (10935879, 12154099, без 10631243), STOP_STATUSES, TEMPLATE_MAP (6 линий + заглушка Б2), FIELD_IDS["time_termin"]
+- db.py: migrate_db() (атомарная, BEGIN IMMEDIATE, идемпотентная), create_message(template_values=...), get_failed_temporal_count(), idx_dedup_temporal
+- messenger/wazzup.py: MessageData с новыми optional полями, send_message() через TEMPLATE_MAP, skipped для заглушки Б2
+- kommo.py: extract_name()
+- app.py: _TERMIN_OPTIONAL_LINES, извлечение имени, template_values в БД, failed_temporal в /health
+- cron.py: восстановление extra-полей из template_values, обработка skipped
+- 5 новых тест-файлов: 205 тестов (0 failed), 2 ревью-цикла
 
 ### 2026-02-24 — T11 акцептована, S01 завершена
 - Интеграционное тестирование: 19 новых E2E-тестов (test_integration_e2e.py)

@@ -193,6 +193,27 @@ class KommoClient:
         return None
 
     @staticmethod
+    def extract_name(contact_data: dict) -> str | None:
+        """Extract the contact's full name from Kommo contact object.
+
+        Kommo stores the full name in the top-level ``name`` field of the
+        contact. This is used for S02 templates that include {{1}}=имя.
+
+        Args:
+            contact_data: full contact object (from get_contact()).
+
+        Returns:
+            Full name string (e.g. "Иван Иванов") or None if not found.
+        """
+        name = contact_data.get("name")
+        if not name:
+            logger.warning(
+                "Name not found for contact %s", contact_data.get("id"),
+            )
+            return None
+        return str(name)
+
+    @staticmethod
     def extract_termin_date(lead_data: dict, field_id: int) -> str | None:
         """Extract a termin date from lead custom fields by field_id.
 

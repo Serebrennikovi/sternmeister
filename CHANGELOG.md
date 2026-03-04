@@ -22,6 +22,7 @@
 - 2026-02-24 — T09: Telegram алерты (alerts.py) — TelegramAlerter с send_alert, alert_messenger_error, alert_kommo_error, alert_cron_error, alert_unexpected_error, alert_info; интеграция в app.py (KommoAPIError, MessengerError, catch-all) и cron.py (retry/pending ошибки, fatal error); graceful degradation без токена; PII masking телефонов; Markdown escaping; 31 тест
 - 2026-02-24 — T10: Production deploy — Docker HEALTHCHECK (auto-restart при deadlock), webhook secret validation (hmac.compare_digest, secret-in-URL), UID 999 в Dockerfile (совпадает с хостом), enhanced /health endpoint (server time, send window status), startup warning при отсутствии KOMMO_WEBHOOK_SECRET. Deploy docs: ngrok systemd service, whatsapp-cron timer, rsync deploy, .env management
 - 2026-02-24 — T11: Интеграционное тестирование — 19 E2E-тестов (test_integration_e2e.py), полный код-ревью, все DoD S01 подтверждены. Итого: 142 теста (141 pass, 1 skip). **S01 WhatsApp Auto-notifications — done**
+- 2026-03-04 — T12: S02 config+schema+webhook+messenger — PIPELINE_CONFIG (Бух Гос/Бератер), TEMPLATE_MAP (6 линий + заглушка Б2), migrate_db() с template_values, extract_name(), MessageData расширен, failed_temporal в /health, восстановление template_values в cron. 205 тестов (0 failed)
 
 ### Fixed
 - 2026-02-24 — Код-ревью T09: Markdown injection в catch-all алерте (send_alert → alert_unexpected_error с _escape_md), добавлен _escape_md в alert_info, интеграционные тесты для cron retry/pending alert_messenger_error
