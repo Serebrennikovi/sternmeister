@@ -337,6 +337,23 @@ def get_pending_messages(at: str | None = None) -> list[sqlite3.Row]:
         conn.close()
 
 
+def get_temporal_dedup(kommo_lead_id: int, line: str, termin_date: str) -> bool:
+    """Check if a temporal message already exists for (lead_id, line, termin_date).
+
+    Used before sending temporal triggers to avoid duplicates.
+    Backed by idx_dedup_temporal unique index (created in migrate_db).
+    """
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM messages WHERE kommo_lead_id=? AND line=? AND termin_date=? LIMIT 1",
+            (kommo_lead_id, line, termin_date),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
 def get_failed_temporal_count() -> int:
     """Count failed messages for temporal lines (for /health endpoint)."""
     conn = _get_conn()

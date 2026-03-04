@@ -552,12 +552,15 @@ Institution определяется однозначно по полю, из к
 ## Задачи
 
 - [x] **T12** — config + schema + webhook/messenger (Г1, Б1): [T12_s02_config_schema_webhook_done.md](../3.%20tasks/Done/S02_notifications_expansion_done/T12_s02_config_schema_webhook_done.md) ✅
-- [ ] **T13** — temporal-триггеры (Б3–Б5): [T13_s02_temporal_triggers.md](../3.%20tasks/S02_notifications_expansion/T13_s02_temporal_triggers.md) ← требует T12
+- [x] **T13** — temporal-триггеры (Б3–Б5): [T13_s02_temporal_triggers_done.md](../3.%20tasks/Done/S02_notifications_expansion_done/T13_s02_temporal_triggers_done.md) ✅ 261 тест
 - [ ] **T14** — деплой S02: [T14_s02_deploy.md](../3.%20tasks/S02_notifications_expansion/T14_s02_deploy.md) ← требует T12, T13
 
 ---
 
 ## История изменений
+
+### v2.7 (2026-03-04) — T13 акцептована
+- T13: temporal-триггеры (Б3–Б5) — выполнена. 261 тест (0 failed), 1 skipped. Три ревью-цикла: 2 HIGH (ретрай temporal ×3, IntegrityError) + 1 HIGH (fail→retry-success) — все исправлены. Файл задачи → Done/.
 
 ### v2.6 (2026-03-04) — T12 акцептована
 - T12: config + schema + webhook/messenger (Г1, Б1) — выполнена. 205 тестов (0 failed). Два ревью-цикла: все MEDIUM/LOW исправлены. Файл задачи → Done/.

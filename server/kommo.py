@@ -2,7 +2,7 @@ import logging
 import re
 import threading
 import time
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import requests
@@ -249,6 +249,83 @@ class KommoClient:
             field_id, lead_data.get("id"),
         )
         return None
+
+    def get_active_leads(self, pipeline_id: int) -> list[dict]:
+        """Fetch all active leads for a pipeline with embedded contacts.
+
+        Iterates pages of 250 until the API returns 204 No Content or an
+        empty page.  Won/lost leads are excluded by Kommo by default.
+
+        Each lead includes ``_embedded.contacts`` with contact IDs (no full
+        data — use ``get_contact()`` for phone/name).
+
+        Args:
+            pipeline_id: Kommo pipeline ID (e.g. 12154099 for Бух Бератер).
+
+        Returns:
+            List of lead dicts.
+
+        Raises:
+            KommoAPIError: on any API or network error.
+        """
+        leads: list[dict] = []
+        page = 1
+        while True:
+            response = self._request("GET", "/leads", params={
+                "filter[pipeline_id][]": pipeline_id,
+                "with": "contacts",
+                "page": page,
+                "limit": 250,
+            })
+            if response.status_code == 204:
+                break
+            data = self._parse_json(response)
+            page_leads = (data.get("_embedded") or {}).get("leads") or []
+            if not page_leads:
+                break
+            leads.extend(page_leads)
+            if len(page_leads) < 250:
+                break  # Last partial page — no need for another request
+            page += 1
+        logger.info(
+            "Fetched %d active leads for pipeline %d", len(leads), pipeline_id,
+        )
+        return leads
+
+    @staticmethod
+    def _extract_date_from_field(lead: dict, field_id: int) -> date | None:
+        """Extract a Unix-timestamp date field from lead custom_fields_values.
+
+        Returns a ``datetime.date`` in Europe/Berlin timezone, or ``None``
+        if the field is absent or the value cannot be parsed.
+        """
+        for field in lead.get("custom_fields_values") or []:
+            if field.get("field_id") == field_id:
+                values = field.get("values") or []
+                if values:
+                    raw = values[0].get("value")
+                    if raw is not None:
+                        try:
+                            ts = int(raw)
+                            return datetime.fromtimestamp(ts, tz=_BERLIN_TZ).date()
+                        except (ValueError, TypeError, OSError):
+                            logger.warning(
+                                "Cannot parse date field %d value %r in lead %s",
+                                field_id, raw, lead.get("id"),
+                            )
+                            return None
+        logger.debug("Date field %d not found in lead %s", field_id, lead.get("id"))
+        return None
+
+    @staticmethod
+    def extract_termin_date_dc(lead: dict) -> date | None:
+        """Extract Jobcenter (ДЦ) termin date from field 887026 as datetime.date."""
+        return KommoClient._extract_date_from_field(lead, 887026)
+
+    @staticmethod
+    def extract_termin_date_aa(lead: dict) -> date | None:
+        """Extract Agentur für Arbeit (АА) termin date from field 887028 as datetime.date."""
+        return KommoClient._extract_date_from_field(lead, 887028)
 
     def add_note(self, lead_id: int, text: str) -> dict:
         """Add a text note to a lead.

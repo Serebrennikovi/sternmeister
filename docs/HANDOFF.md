@@ -1,6 +1,6 @@
 # HANDOFF — WhatsApp Auto-notifications (Sternmeister)
 
-**Последнее обновление:** 04.03.2026 (T12 акцептована)
+**Последнее обновление:** 04.03.2026 (T13 акцептована)
 
 ---
 
@@ -30,7 +30,7 @@
 
 **Задачи:**
 - [x] T12 — config + schema + webhook/messenger (Г1, Б1): [T12_s02_config_schema_webhook_done.md](3.%20tasks/Done/S02_notifications_expansion_done/T12_s02_config_schema_webhook_done.md) ✅ 205 тестов
-- [ ] T13 — temporal-триггеры (Б3–Б5): [T13_s02_temporal_triggers.md](3.%20tasks/S02_notifications_expansion/T13_s02_temporal_triggers.md) ← требует T12
+- [x] T13 — temporal-триггеры (Б3–Б5): [T13_s02_temporal_triggers_done.md](3.%20tasks/Done/S02_notifications_expansion_done/T13_s02_temporal_triggers_done.md) ✅ 261 тест
 - [ ] T14 — деплой S02: [T14_s02_deploy.md](3.%20tasks/S02_notifications_expansion/T14_s02_deploy.md) ← требует T12, T13
 
 **Блокеры:**
@@ -105,6 +105,14 @@
 ---
 
 ## История изменений
+
+### 2026-03-04 — T13 акцептована
+- kommo.py: get_active_leads() (пагинация 250/стр, with=contacts), extract_termin_date_dc(), extract_termin_date_aa(), _extract_date_from_field()
+- utils.py: weekday_name(), format_date_ru()
+- db.py: get_temporal_dedup()
+- cron.py: process_temporal_triggers() (СТОП-проверка, деdup, ДЦ/АА независимо, contact fetch, Berlin today), _TEMPORAL_LINES, next_retry_at=None для sent temporal, try/except IntegrityError
+- 2 новых тест-файла: 261 тест (0 failed, 1 skipped), 3 ревью-цикла; закрыты H1+H2+H1-NEW (customer-facing ретрай ×3, IntegrityError, fail→retry-success)
+- docs/5. unsorted/kommo_api_reference.md: справочник GET /leads
 
 ### 2026-03-04 — T12 акцептована
 - config.py: PIPELINE_CONFIG (10935879, 12154099, без 10631243), STOP_STATUSES, TEMPLATE_MAP (6 линий + заглушка Б2), FIELD_IDS["time_termin"]

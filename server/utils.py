@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import parse_qs
 from zoneinfo import ZoneInfo
 
@@ -79,6 +79,25 @@ def parse_bracket_form(raw_body: bytes) -> dict:
             continue
         _set_nested(result, parts, values[0])
     return result
+
+
+_WEEKDAY_NAMES_RU = [
+    "Понедельник", "Вторник", "Среда",
+    "Четверг", "Пятница", "Суббота", "Воскресенье",
+]
+
+
+def weekday_name(d: date) -> str:
+    """Return Russian weekday name for a date.
+
+    Uses hardcoded list — locale is not set in Docker.
+    """
+    return _WEEKDAY_NAMES_RU[d.weekday()]
+
+
+def format_date_ru(d: date) -> str:
+    """Format a date as DD.MM.YYYY (Russian convention)."""
+    return d.strftime("%d.%m.%Y")
 
 
 def _set_nested(root: dict, keys: list[str], value: str) -> None:
