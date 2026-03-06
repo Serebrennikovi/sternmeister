@@ -41,6 +41,9 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_status_next_retry ON messages (status, next_retry_at);",
     "CREATE INDEX IF NOT EXISTS idx_kommo_contact ON messages (kommo_contact_id);",
     "CREATE INDEX IF NOT EXISTS idx_dedup ON messages (kommo_lead_id, line, created_at);",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_dedup_webhook_lines
+    ON messages(kommo_lead_id, line)
+    WHERE line IN ('gosniki_consultation_done', 'berater_accepted');""",
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_dedup_temporal
     ON messages(kommo_lead_id, line, termin_date)
     WHERE line IN (
@@ -91,6 +94,8 @@ def migrate_db() -> None:
         cursor = conn.execute("PRAGMA table_info(messages)")
         cols = [row[1] for row in cursor.fetchall()]
         if "template_values" in cols:
+            for idx_sql in _CREATE_INDEXES:
+                conn.execute(idx_sql)
             return
 
         conn.execute("BEGIN IMMEDIATE")
@@ -348,6 +353,19 @@ def get_temporal_dedup(kommo_lead_id: int, line: str, termin_date: str) -> bool:
         row = conn.execute(
             "SELECT 1 FROM messages WHERE kommo_lead_id=? AND line=? AND termin_date=? LIMIT 1",
             (kommo_lead_id, line, termin_date),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def get_webhook_line_exists(kommo_lead_id: int, line: str) -> bool:
+    """Check if a webhook line message already exists for (lead_id, line)."""
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM messages WHERE kommo_lead_id=? AND line=? LIMIT 1",
+            (kommo_lead_id, line),
         ).fetchone()
         return row is not None
     finally:

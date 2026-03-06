@@ -553,11 +553,19 @@ Institution определяется однозначно по полю, из к
 
 - [x] **T12** — config + schema + webhook/messenger (Г1, Б1): [T12_s02_config_schema_webhook_done.md](../3.%20tasks/Done/S02_notifications_expansion_done/T12_s02_config_schema_webhook_done.md) ✅
 - [x] **T13** — temporal-триггеры (Б3–Б5): [T13_s02_temporal_triggers_done.md](../3.%20tasks/Done/S02_notifications_expansion_done/T13_s02_temporal_triggers_done.md) ✅ 261 тест
-- [ ] **T14** — деплой S02: [T14_s02_deploy.md](../3.%20tasks/S02_notifications_expansion/T14_s02_deploy.md) ← требует T12, T13
+- [x] **T14** — деплой S02: [T14_s02_deploy_done.md](../3.%20tasks/Done/S02_notifications_expansion_done/T14_s02_deploy_done.md) ✅
+- [ ] **T15** — fail-safe backfill для пропущенных webhook-триггеров (Г1/Б1): [T15_s02_webhook_backfill_failsafe.md](../3.%20tasks/S02_notifications_expansion/T15_s02_webhook_backfill_failsafe.md)
 
 ---
 
 ## История изменений
+
+### v2.9 (2026-03-06) — добавлена T15 (stabilization)
+- После production-проверки выявлен сценарий потери webhook-события для автосозданной дочерней сделки (Бератер), из-за чего сообщение Б1 не создаётся в `messages` и не отправляется.
+- Спека S02 переоткрыта для стабилизационной задачи T15: fail-safe backfill webhook-линий (Г1/Б1) через cron с идемпотентной защитой от дублей.
+
+### v2.8 (2026-03-06) — T14 акцептована, S02 завершена
+- T14: деплой S02 на Hetzner — выполнен. Миграция БД завершена, все критерии приёмки пройдены. S02 работает в продакшене: Г1 + Б1 webhooks + B3-B5 temporal triggers активны. Все 3 задачи спеки (T12-T14) завершены → спецификация S02 закрыта.
 
 ### v2.7 (2026-03-04) — T13 акцептована
 - T13: temporal-триггеры (Б3–Б5) — выполнена. 261 тест (0 failed), 1 skipped. Три ревью-цикла: 2 HIGH (ретрай temporal ×3, IntegrityError) + 1 HIGH (fail→retry-success) — все исправлены. Файл задачи → Done/.

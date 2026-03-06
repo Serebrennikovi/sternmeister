@@ -91,10 +91,10 @@ class TestGosnikWebhook:
     @patch("server.app.get_kommo_client")
     @patch("server.app.get_messenger")
     @patch("server.app.create_message", return_value=11)
-    @patch("server.app.get_recent_message", return_value=None)
+    @patch("server.app.get_webhook_line_exists", return_value=False)
     @patch("server.app.is_in_send_window", return_value=True)
     def test_gosniki_sends_message_with_name(
-        self, mock_window, mock_recent, mock_create,
+        self, mock_window, mock_exists, mock_create,
         mock_get_messenger, mock_get_kommo, client,
     ):
         """Gosniki webhook: name extracted, MessageData.name filled, message sent."""
@@ -125,9 +125,9 @@ class TestGosnikWebhook:
         assert call_kw["template_values"] == json.dumps(["Иван Петров"])
 
     @patch("server.app.get_kommo_client")
-    @patch("server.app.get_recent_message", return_value=None)
+    @patch("server.app.get_webhook_line_exists", return_value=False)
     def test_gosniki_without_name_returns_error(
-        self, mock_recent, mock_get_kommo, client,
+        self, mock_exists, mock_get_kommo, client,
     ):
         """Gosniki webhook: name not found → error (template requires {{1}}=имя)."""
         kommo = MagicMock()
@@ -149,10 +149,10 @@ class TestGosnikWebhook:
     @patch("server.app.get_kommo_client")
     @patch("server.app.get_messenger")
     @patch("server.app.create_message", return_value=12)
-    @patch("server.app.get_recent_message", return_value=None)
+    @patch("server.app.get_webhook_line_exists", return_value=False)
     @patch("server.app.is_in_send_window", return_value=True)
     def test_gosniki_proceeds_without_termin_date(
-        self, mock_window, mock_recent, mock_create,
+        self, mock_window, mock_exists, mock_create,
         mock_get_messenger, mock_get_kommo, client,
     ):
         """Gosniki: termin_date optional — empty string stored, message still sent."""
@@ -185,10 +185,10 @@ class TestBeraterAcceptedWebhook:
     @patch("server.app.get_kommo_client")
     @patch("server.app.get_messenger")
     @patch("server.app.create_message", return_value=21)
-    @patch("server.app.get_recent_message", return_value=None)
+    @patch("server.app.get_webhook_line_exists", return_value=False)
     @patch("server.app.is_in_send_window", return_value=True)
     def test_berater_accepted_sends_message(
-        self, mock_window, mock_recent, mock_create,
+        self, mock_window, mock_exists, mock_create,
         mock_get_messenger, mock_get_kommo, client,
     ):
         """Berater accepted webhook: line=berater_accepted, template_values=[name]."""
@@ -218,9 +218,9 @@ class TestBeraterAcceptedWebhook:
         assert call_kw["template_values"] == json.dumps(["Мария Шмидт"])
 
     @patch("server.app.get_kommo_client")
-    @patch("server.app.get_recent_message", return_value=None)
+    @patch("server.app.get_webhook_line_exists", return_value=False)
     def test_berater_accepted_without_name_returns_error(
-        self, mock_recent, mock_get_kommo, client,
+        self, mock_exists, mock_get_kommo, client,
     ):
         kommo = MagicMock()
         kommo.get_lead_contact.return_value = (

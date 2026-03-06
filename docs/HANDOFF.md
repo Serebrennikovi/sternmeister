@@ -1,44 +1,33 @@
 # HANDOFF — WhatsApp Auto-notifications (Sternmeister)
 
-**Последнее обновление:** 04.03.2026 (T13 акцептована)
+**Последнее обновление:** 06.03.2026 (добавлена T15 stabilization для S02)
 
 ---
 
 ## Текущий статус
 
-**S01 завершена, S02 готова к разработке.** Сервис S01 работает в продакшне. Спецификация S02 закрыта, все вопросы решены, задачи декомпозированы.
+**S01 завершена, S02 в stabilization.** Базовая цепочка S02 в продакшене работает, но открыт production gap: автосозданные сделки могут не проходить webhook-путь и пропускать отправку.
 
 ---
 
-## Активная спецификация
-
-### S02: Расширение системы уведомлений 📋 в работе
-
-Расширение S01: цепочка из 6 WABA-сообщений — 2 webhook + 4 temporal (по дате термина ДЦ и АА).
-
-Файл: [S02_notifications_expansion.md](2.%20specifications/S02_notifications_expansion.md)
-
-**Статус:** Спека закрыта (v2.5, все вопросы решены). Задачи декомпозированы. Готово к разработке.
-
-**Цепочка (финальная):**
-- Г1: webhook "Консультация проведена" (Бух Гос)
-- Б1: webhook "Принято от первой линии" (Бух Бератер)
-- Б2: temporal -7 дней (заглушка — WABA не одобрен, ждём Виктора)
-- Б3: temporal -3 дня
-- Б4: temporal -1 день
-- Б5: temporal в день термина
-
-**Задачи:**
-- [x] T12 — config + schema + webhook/messenger (Г1, Б1): [T12_s02_config_schema_webhook_done.md](3.%20tasks/Done/S02_notifications_expansion_done/T12_s02_config_schema_webhook_done.md) ✅ 205 тестов
-- [x] T13 — temporal-триггеры (Б3–Б5): [T13_s02_temporal_triggers_done.md](3.%20tasks/Done/S02_notifications_expansion_done/T13_s02_temporal_triggers_done.md) ✅ 261 тест
-- [ ] T14 — деплой S02: [T14_s02_deploy.md](3.%20tasks/S02_notifications_expansion/T14_s02_deploy.md) ← требует T12, T13
-
-**Блокеры:**
-- [ ] WABA-шаблон Б2 "За 7 дней" — переподать Виктору. Не блокирует разработку (код с заглушкой)
 
 ---
 
-## Завершённая спецификация
+## Завершённые спецификации
+
+### S02: Расширение системы уведомлений 🛠 stabilization
+
+Цепочка из 6 WABA-сообщений — 2 webhook (Г1, Б1) + 4 temporal (B3-B5 по дате термина ДЦ и АА).
+
+Файл: [S02_notifications_expansion_done.md](2.%20specifications/S02_notifications_expansion_done.md)
+
+**Задачи:** T12 ✅ (config + schema + webhook) → T13 ✅ (temporal triggers) → T14 ✅ (deploy to production) → T15 ⏳ (fail-safe backfill webhook-линий)
+
+**Статус:** Развёрнута на production (Hetzner 65.108.154.202). Идёт стабилизация через T15.
+
+**Открытые вопросы:**
+- WABA-шаблон Б2 "За 7 дней" не одобрен, деплоится с заглушкой
+- Автосозданные child-лиды могут не генерировать webhook `status_changed` для Б1, поэтому не создаётся запись в `messages` (T15)
 
 ### S01: WhatsApp Auto-notifications ✅ done
 

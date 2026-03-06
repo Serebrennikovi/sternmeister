@@ -24,6 +24,7 @@
 - 2026-02-24 — T11: Интеграционное тестирование — 19 E2E-тестов (test_integration_e2e.py), полный код-ревью, все DoD S01 подтверждены. Итого: 142 теста (141 pass, 1 skip). **S01 WhatsApp Auto-notifications — done**
 - 2026-03-04 — T12: S02 config+schema+webhook+messenger — PIPELINE_CONFIG (Бух Гос/Бератер), TEMPLATE_MAP (6 линий + заглушка Б2), migrate_db() с template_values, extract_name(), MessageData расширен, failed_temporal в /health, восстановление template_values в cron. 205 тестов (0 failed)
 - 2026-03-04 — T13: S02 temporal-триггеры (Б3–Б5) — process_temporal_triggers() с СТОП-проверкой, дедупликацией, пагинацией, Berlin today; get_active_leads(), extract_termin_date_dc/aa(), weekday_name(), format_date_ru(), get_temporal_dedup(); _TEMPORAL_LINES (next_retry_at=None для sent temporal), IntegrityError race protection. 261 тест (0 failed)
+- 2026-03-06 — T14: S02 деплой на Hetzner — Docker rebuild + redeploy (образ :s02), DB миграция (migrate_db() с template_values, новые line-значения, idx_dedup_temporal), backup БД, smoke-тесты в продакшене. Все 7 критериев приёмки пройдены. **S02 WhatsApp Notifications Expansion — done**
 
 ### Fixed
 - 2026-02-24 — Код-ревью T09: Markdown injection в catch-all алерте (send_alert → alert_unexpected_error с _escape_md), добавлен _escape_md в alert_info, интеграционные тесты для cron retry/pending alert_messenger_error

@@ -7,7 +7,15 @@ from unittest.mock import patch
 
 import pytest
 
-from server.db import _get_conn, init_db, migrate_db, create_message, get_message_by_id, get_failed_temporal_count
+from server.db import (
+    _get_conn,
+    create_message,
+    get_failed_temporal_count,
+    get_message_by_id,
+    get_webhook_line_exists,
+    init_db,
+    migrate_db,
+)
 
 
 # -----------------------------------------------------------------------
@@ -163,6 +171,21 @@ class TestMigrateDb:
 
         assert indexes is not None, "idx_dedup_temporal should exist after migration"
 
+    def test_migrate_creates_idx_dedup_webhook_lines(self, temp_db):
+        _make_s01_db(temp_db)
+        with patch("server.db.DATABASE_PATH", temp_db):
+            migrate_db()
+
+        conn = sqlite3.connect(temp_db)
+        try:
+            indexes = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_dedup_webhook_lines'"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert indexes is not None, "idx_dedup_webhook_lines should exist after migration"
+
     def test_migrate_is_idempotent(self, temp_db):
         _make_s01_db(temp_db)
         with patch("server.db.DATABASE_PATH", temp_db):
@@ -211,6 +234,50 @@ class TestMigrateDb:
                         'sent', 1, '2026-03-01T11:00:00+00:00')
                 """)
                 conn.commit()
+        finally:
+            conn.close()
+
+    def test_idx_dedup_webhook_lines_enforces_uniqueness(self, temp_db):
+        _make_s01_db(temp_db)
+        with patch("server.db.DATABASE_PATH", temp_db):
+            migrate_db()
+
+        conn = sqlite3.connect(temp_db)
+        try:
+            conn.execute("""
+            INSERT INTO messages
+                (kommo_lead_id, kommo_contact_id, phone, line, termin_date, message_text,
+                 status, attempts, created_at)
+            VALUES (123, 50, '+491234567894', 'berater_accepted', '', 'B1 msg',
+                    'sent', 1, '2026-03-01T09:02:00+00:00')
+            """)
+            conn.commit()
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute("""
+                INSERT INTO messages
+                    (kommo_lead_id, kommo_contact_id, phone, line, termin_date, message_text,
+                     status, attempts, created_at)
+                VALUES (123, 51, '+491234567895', 'berater_accepted', '', 'B1 duplicate',
+                        'sent', 1, '2026-03-01T09:03:00+00:00')
+                """)
+                conn.commit()
+
+            # Non-webhook lines are not constrained by idx_dedup_webhook_lines.
+            conn.execute("""
+            INSERT INTO messages
+                (kommo_lead_id, kommo_contact_id, phone, line, termin_date, message_text,
+                 status, attempts, created_at)
+            VALUES (123, 52, '+491234567896', 'first', '25.03.2026', 'S01 line',
+                    'sent', 1, '2026-03-01T09:04:00+00:00')
+            """)
+            conn.execute("""
+            INSERT INTO messages
+                (kommo_lead_id, kommo_contact_id, phone, line, termin_date, message_text,
+                 status, attempts, created_at)
+            VALUES (123, 53, '+491234567897', 'first', '25.03.2026', 'S01 line duplicate',
+                    'sent', 1, '2026-03-01T09:05:00+00:00')
+            """)
+            conn.commit()
         finally:
             conn.close()
 
@@ -272,3 +339,30 @@ class TestGetFailedTemporalCount:
     def test_empty_db_returns_zero(self, fresh_db):
         with patch("server.db.DATABASE_PATH", fresh_db):
             assert get_failed_temporal_count() == 0
+
+
+class TestGetWebhookLineExists:
+    @pytest.fixture(autouse=True)
+    def fresh_db(self, tmp_path):
+        db_path = str(tmp_path / "test_webhook_exists.db")
+        with patch("server.db.DATABASE_PATH", db_path), \
+             patch("server.config.DATABASE_PATH", db_path):
+            init_db()
+            yield db_path
+
+    def test_returns_true_if_row_exists(self, fresh_db):
+        with patch("server.db.DATABASE_PATH", fresh_db):
+            create_message(
+                kommo_lead_id=777,
+                kommo_contact_id=1,
+                phone="+491234567890",
+                line="gosniki_consultation_done",
+                termin_date="",
+                message_text="msg",
+                status="sent",
+            )
+            assert get_webhook_line_exists(777, "gosniki_consultation_done") is True
+
+    def test_returns_false_if_no_row(self, fresh_db):
+        with patch("server.db.DATABASE_PATH", fresh_db):
+            assert get_webhook_line_exists(999, "gosniki_consultation_done") is False

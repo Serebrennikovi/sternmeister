@@ -240,16 +240,13 @@ class TestWebhookValidation:
 class TestWebhookDedup:
     """Deduplication — skip if same lead+line was processed recently."""
 
-    @patch("server.app.get_recent_message")
-    def test_duplicate_skipped(self, mock_recent, client):
-        mock_recent.return_value = {
-            "id": 42, "created_at": "2026-02-24T10:00:00+00:00",
-        }
+    @patch("server.app.get_webhook_line_exists", return_value=True)
+    def test_duplicate_skipped(self, mock_exists, client):
+        """Webhook line (berater_accepted) uses lifetime dedup via get_webhook_line_exists."""
         resp = client.post("/webhook/kommo", json=_kommo_json_payload())
         assert resp.status_code == 200
         result = _single_result(resp)
         assert result["message"] == "Duplicate webhook, already processed"
-        assert result["existing_message_id"] == 42
 
 
 # ---------------------------------------------------------------------------

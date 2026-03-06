@@ -1,6 +1,7 @@
 import hmac
 import json
 import logging
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -15,7 +16,10 @@ from server.config import (
     PHONE_WHITELIST, RETRY_INTERVAL_HOURS, SEND_WINDOW_START,
     SEND_WINDOW_END, determine_line,
 )
-from server.db import create_message, get_failed_temporal_count, get_recent_message, init_db
+from server.db import (
+    create_message, get_failed_temporal_count, get_recent_message,
+    get_webhook_line_exists, init_db,
+)
 from server.kommo import KommoAPIError, get_kommo_client
 from server.messenger import MessageData, MessengerError, get_messenger
 from server.utils import (
@@ -168,22 +172,33 @@ def _process_lead_status_inner(lead_status: dict) -> dict:
         lead_id, pipeline_id, status_id, line,
     )
 
-    # 2b. Deduplication: skip if same lead+line was processed recently.
-    # Note: this is a read-then-write pattern without a lock, so
-    # theoretically two concurrent webhooks for the same lead+line
-    # could both pass the check.  At ~60 msgs/day this is negligible;
-    # worst case is a duplicate message, not a system failure.
-    existing = get_recent_message(lead_id, line, within_minutes=DEDUP_WINDOW_MINUTES)
-    if existing:
-        logger.info(
-            "Duplicate webhook for lead=%d line=%s (msg %d at %s), skipping",
-            lead_id, line, existing["id"], existing["created_at"],
-        )
-        return {
-            "status": "ok",
-            "message": "Duplicate webhook, already processed",
-            "existing_message_id": existing["id"],
-        }
+    # 2b. Deduplication.
+    # Webhook lines (Г1/Б1): lifetime dedup — one message per (lead_id, line)
+    # for the entire deal lifecycle.  Matches partial unique index
+    # idx_dedup_webhook_lines and the backfill logic in cron.py.
+    # Other lines: time-based dedup (DEDUP_WINDOW_MINUTES).
+    if line in _TERMIN_OPTIONAL_LINES:
+        if get_webhook_line_exists(lead_id, line):
+            logger.info(
+                "Duplicate webhook for lead=%d line=%s (lifetime dedup), skipping",
+                lead_id, line,
+            )
+            return {
+                "status": "ok",
+                "message": "Duplicate webhook, already processed",
+            }
+    else:
+        existing = get_recent_message(lead_id, line, within_minutes=DEDUP_WINDOW_MINUTES)
+        if existing:
+            logger.info(
+                "Duplicate webhook for lead=%d line=%s (msg %d at %s), skipping",
+                lead_id, line, existing["id"], existing["created_at"],
+            )
+            return {
+                "status": "ok",
+                "message": "Duplicate webhook, already processed",
+                "existing_message_id": existing["id"],
+            }
 
     # 3. Get lead + contact from Kommo
     kommo = get_kommo_client()
@@ -258,18 +273,28 @@ def _process_lead_status_inner(lead_status: dict) -> dict:
     # 7. Check send window — outside 9-21 Berlin -> save as pending
     if not is_in_send_window():
         next_retry_at = get_next_send_window_start()
-        msg_id = create_message(
-            kommo_lead_id=lead_id,
-            kommo_contact_id=contact_id,
-            phone=phone,
-            line=line,
-            termin_date=termin_date,
-            message_text=message_text,
-            status="pending",
-            attempts=0,
-            next_retry_at=next_retry_at,
-            template_values=template_values_json,
-        )
+        try:
+            msg_id = create_message(
+                kommo_lead_id=lead_id,
+                kommo_contact_id=contact_id,
+                phone=phone,
+                line=line,
+                termin_date=termin_date,
+                message_text=message_text,
+                status="pending",
+                attempts=0,
+                next_retry_at=next_retry_at,
+                template_values=template_values_json,
+            )
+        except sqlite3.IntegrityError:
+            logger.info(
+                "Dedup race (pending): lead=%d line=%s, already processed",
+                lead_id, line,
+            )
+            return {
+                "status": "ok",
+                "message": "Duplicate webhook, already processed (race)",
+            }
         logger.info(
             "Outside send window, scheduled msg %d for %s", msg_id, next_retry_at,
         )
@@ -291,17 +316,23 @@ def _process_lead_status_inner(lead_status: dict) -> dict:
         next_retry_at = (
             now + timedelta(hours=RETRY_INTERVAL_HOURS)
         ).isoformat(timespec="seconds")
-        create_message(
-            kommo_lead_id=lead_id,
-            kommo_contact_id=contact_id,
-            phone=phone,
-            line=line,
-            termin_date=termin_date,
-            message_text=message_text,
-            status="failed",
-            next_retry_at=next_retry_at,
-            template_values=template_values_json,
-        )
+        try:
+            create_message(
+                kommo_lead_id=lead_id,
+                kommo_contact_id=contact_id,
+                phone=phone,
+                line=line,
+                termin_date=termin_date,
+                message_text=message_text,
+                status="failed",
+                next_retry_at=next_retry_at,
+                template_values=template_values_json,
+            )
+        except sqlite3.IntegrityError:
+            logger.info(
+                "Dedup race (failed): lead=%d line=%s, already processed",
+                lead_id, line,
+            )
         return {"status": "error", "message": f"Messenger error: {exc}"}
 
     # 9. Save to DB
@@ -311,19 +342,32 @@ def _process_lead_status_inner(lead_status: dict) -> dict:
         now + timedelta(hours=RETRY_INTERVAL_HOURS)
     ).isoformat(timespec="seconds")
 
-    msg_id = create_message(
-        kommo_lead_id=lead_id,
-        kommo_contact_id=contact_id,
-        phone=phone,
-        line=line,
-        termin_date=termin_date,
-        message_text=message_text,
-        status="sent",
-        sent_at=sent_at,
-        next_retry_at=next_retry_at,
-        messenger_id=result["message_id"],
-        template_values=template_values_json,
-    )
+    try:
+        msg_id = create_message(
+            kommo_lead_id=lead_id,
+            kommo_contact_id=contact_id,
+            phone=phone,
+            line=line,
+            termin_date=termin_date,
+            message_text=message_text,
+            status="sent",
+            sent_at=sent_at,
+            next_retry_at=next_retry_at,
+            messenger_id=result["message_id"],
+            template_values=template_values_json,
+        )
+    except sqlite3.IntegrityError:
+        # Race: backfill or another webhook already inserted a record.
+        # Message was already sent above — narrow TOCTOU window, acceptable.
+        logger.warning(
+            "Dedup race (sent): lead=%d line=%s — message sent but DB record "
+            "already exists",
+            lead_id, line,
+        )
+        return {
+            "status": "ok",
+            "message": "Processed (dedup race on save)",
+        }
 
     # 10. Add note to Kommo (non-critical)
     try:

@@ -295,7 +295,7 @@ class TestWebhookAlerterIntegration:
         }
 
     @patch("server.app.get_alerter")
-    @patch("server.app.get_recent_message", return_value=None)
+    @patch("server.app.get_webhook_line_exists", return_value=False)
     @patch("server.app.get_kommo_client")
     def test_kommo_error_triggers_alert(self, mock_gc, mock_dedup, mock_ga, client):
         from server.kommo import KommoAPIError
@@ -313,7 +313,7 @@ class TestWebhookAlerterIntegration:
         alerter.alert_kommo_error.assert_called_once_with(123, "503 unavailable")
 
     @patch("server.app.get_alerter")
-    @patch("server.app.get_recent_message", return_value=None)
+    @patch("server.app.get_webhook_line_exists", return_value=False)
     @patch("server.app.get_kommo_client")
     def test_no_phone_triggers_warning(self, mock_gc, mock_dedup, mock_ga, client):
         kommo = MagicMock()
@@ -336,7 +336,7 @@ class TestWebhookAlerterIntegration:
         assert call_args[1]["level"] == "WARNING"
 
     @patch("server.app.get_alerter")
-    @patch("server.app.get_recent_message", return_value=None)
+    @patch("server.app.get_webhook_line_exists", return_value=False)
     @patch("server.app.get_kommo_client")
     def test_no_name_triggers_warning(self, mock_gc, mock_dedup, mock_ga, client):
         """For berater_accepted (S02): missing name → send_alert WARNING."""
@@ -365,7 +365,7 @@ class TestWebhookAlerterIntegration:
 
     @freeze_time("2026-02-24T14:00:00Z")  # inside send window
     @patch("server.app.get_alerter")
-    @patch("server.app.get_recent_message", return_value=None)
+    @patch("server.app.get_webhook_line_exists", return_value=False)
     @patch("server.app.get_kommo_client")
     @patch("server.app.get_messenger")
     @patch("server.app.create_message", return_value=1)

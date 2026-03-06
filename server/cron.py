@@ -15,21 +15,34 @@ from zoneinfo import ZoneInfo
 from server.alerts import get_alerter
 from server.config import (
     MAX_RETRY_ATTEMPTS, PHONE_WHITELIST,
-    RETRY_INTERVAL_HOURS, STOP_STATUSES, TEMPLATE_MAP,
+    RETRY_INTERVAL_HOURS, STOP_STATUSES, TEMPLATE_MAP, determine_line,
 )
 from server.db import (
     create_message,
     get_messages_for_retry,
     get_pending_messages,
     get_temporal_dedup,
+    get_webhook_line_exists,
     init_db,
     update_message,
 )
 from server.kommo import KommoAPIError, get_kommo_client
 from server.messenger import MessageData, MessengerError, get_messenger
-from server.utils import format_date_ru, is_in_send_window, weekday_name
+from server.utils import (
+    format_date_ru,
+    get_next_send_window_start,
+    is_in_send_window,
+    weekday_name,
+)
 
 logger = logging.getLogger(__name__)
+
+# T15 rule: for webhook lines (Г1/Б1), send no more than one message per (lead_id, line)
+# for the deal lifecycle. Enforced by code-level checks + DB partial unique index.
+_WEBHOOK_BACKFILL_TARGETS: tuple[tuple[int, int], ...] = (
+    (10935879, 95514983),  # Бух Гос / Консультация проведена → gosniki_consultation_done
+    (12154099, 93860331),  # Бух Бератер / Принято от 1й линии → berater_accepted
+)
 
 
 def _add_kommo_note(lead_id: int, line: str, note_type: str) -> None:
@@ -231,6 +244,184 @@ def process_pending() -> tuple[int, int]:
         logger.info("Pending OK for msg %d (messenger_id=%s)", msg_id, result["message_id"])
 
     return success, failed
+
+
+def process_webhook_backfill() -> tuple[int, int]:
+    """Fail-safe backfill for webhook lines (Г1/Б1) missed by status_changed webhook."""
+    kommo = get_kommo_client()
+    messenger = get_messenger()
+    created = 0
+    failed = 0
+
+    for pipeline_id, target_status_id in _WEBHOOK_BACKFILL_TARGETS:
+        line = determine_line(pipeline_id, target_status_id)
+        if line is None:
+            logger.error(
+                "Backfill config error: no line mapping for pipeline=%d status=%d",
+                pipeline_id, target_status_id,
+            )
+            continue
+
+        try:
+            leads = kommo.get_active_leads(pipeline_id)
+        except KommoAPIError as exc:
+            logger.error(
+                "Backfill: get_active_leads failed (pipeline=%d): %s",
+                pipeline_id, exc,
+            )
+            get_alerter().alert_cron_error(
+                f"Backfill get_active_leads failed for pipeline {pipeline_id}: {exc}",
+            )
+            continue
+
+        logger.info(
+            "Backfill: pipeline=%d line=%s active=%d",
+            pipeline_id, line, len(leads),
+        )
+
+        for lead in leads:
+            if lead.get("status_id") != target_status_id:
+                continue
+
+            lead_id_raw = lead.get("id")
+            if lead_id_raw is None:
+                logger.warning("Backfill: lead without id in pipeline=%d", pipeline_id)
+                continue
+            lead_id = int(lead_id_raw)
+
+            if get_webhook_line_exists(lead_id, line):
+                logger.debug("Backfill dedup: lead=%d line=%s already exists", lead_id, line)
+                continue
+
+            # Embedded contacts contain only IDs; fetch full contact for name/phone.
+            try:
+                contacts = (lead.get("_embedded") or {}).get("contacts") or []
+                if not contacts:
+                    raise KommoAPIError(f"Lead {lead_id} has no embedded contacts")
+                main_contact = next((c for c in contacts if c.get("is_main")), contacts[0])
+                contact_id = int(main_contact["id"])
+                contact = kommo.get_contact(contact_id)
+                name = kommo.extract_name(contact)
+                if name is None:
+                    raise KommoAPIError(
+                        f"Name not found for contact {contact_id} (lead {lead_id})",
+                    )
+                phone = kommo.extract_phone(contact)
+                if not phone:
+                    raise KommoAPIError(
+                        f"Phone not found for contact {contact_id} (lead {lead_id})",
+                    )
+            except (KeyError, TypeError, ValueError, KommoAPIError) as exc:
+                logger.error("Backfill contact fetch failed for lead %d: %s", lead_id, exc)
+                get_alerter().alert_kommo_error(lead_id, str(exc))
+                continue
+
+            if PHONE_WHITELIST and phone not in PHONE_WHITELIST:
+                logger.info("Backfill skip lead %d: phone not in whitelist", lead_id)
+                continue
+
+            # termin_date="": Г1/Б1 templates use only {{1}}=name, no date variable.
+            message_data = MessageData(line=line, termin_date="", name=name)
+            template_values_json = json.dumps([name])
+            message_text = messenger.build_message_text(message_data)
+
+            if not is_in_send_window():
+                next_retry_at = get_next_send_window_start()
+                try:
+                    create_message(
+                        kommo_lead_id=lead_id,
+                        kommo_contact_id=contact_id,
+                        phone=phone,
+                        line=line,
+                        termin_date="",
+                        message_text=message_text,
+                        status="pending",
+                        attempts=0,
+                        next_retry_at=next_retry_at,
+                        template_values=template_values_json,
+                    )
+                except sqlite3.IntegrityError:
+                    logger.warning(
+                        "Backfill dedup race (pending): lead=%d line=%s",
+                        lead_id, line,
+                    )
+                    continue
+                created += 1
+                logger.info(
+                    "Backfill scheduled pending lead=%d line=%s next_retry_at=%s",
+                    lead_id, line, next_retry_at,
+                )
+                continue
+
+            # Record-before-send: reserve DB slot as "pending" BEFORE sending.
+            # If IntegrityError here, no WhatsApp was sent => safe dedup.
+            try:
+                msg_id = create_message(
+                    kommo_lead_id=lead_id,
+                    kommo_contact_id=contact_id,
+                    phone=phone,
+                    line=line,
+                    termin_date="",
+                    message_text=message_text,
+                    status="pending",
+                    attempts=0,
+                    next_retry_at=None,
+                    template_values=template_values_json,
+                )
+            except sqlite3.IntegrityError:
+                logger.warning(
+                    "Backfill dedup race (reserve): lead=%d line=%s",
+                    lead_id, line,
+                )
+                continue
+
+            try:
+                result = messenger.send_message(phone, message_data)
+            except MessengerError as exc:
+                logger.error("Backfill messenger error for lead %d: %s", lead_id, exc)
+                get_alerter().alert_messenger_error(phone, str(exc))
+                next_retry_at = (
+                    datetime.now(tz=timezone.utc) + timedelta(hours=RETRY_INTERVAL_HOURS)
+                ).isoformat(timespec="seconds")
+                update_message(
+                    msg_id,
+                    status="failed",
+                    attempts=1,
+                    next_retry_at=next_retry_at,
+                )
+                failed += 1
+                continue
+
+            # Currently unreachable: both Г1/Б1 have real WABA GUIDs.
+            # Added for consistency with process_retries() and process_pending().
+            if result.get("status") == "skipped":
+                logger.info(
+                    "Backfill skipped lead=%d line=%s (placeholder template)",
+                    lead_id, line,
+                )
+                continue
+
+            now = datetime.now(tz=timezone.utc)
+            sent_at = now.isoformat(timespec="seconds")
+            next_retry_at = (
+                now + timedelta(hours=RETRY_INTERVAL_HOURS)
+            ).isoformat(timespec="seconds")
+            update_message(
+                msg_id,
+                status="sent",
+                attempts=1,
+                sent_at=sent_at,
+                next_retry_at=next_retry_at,
+                messenger_id=result["message_id"],
+            )
+            _add_kommo_note(lead_id, line, "backfill")
+            created += 1
+            logger.info(
+                "Backfill sent lead=%d line=%s messenger_id=%s",
+                lead_id, line, result["message_id"],
+            )
+
+    return created, failed
 
 
 _BERLIN_TZ = ZoneInfo("Europe/Berlin")
@@ -451,6 +642,7 @@ def main() -> int:
     try:
         retry_ok, retry_fail = process_retries()
         pending_ok, pending_fail = process_pending()
+        backfill_created, backfill_failed = process_webhook_backfill()
         process_temporal_triggers()
     except Exception as exc:
         logger.exception("Cron fatal error")
@@ -458,8 +650,9 @@ def main() -> int:
         return 1
 
     logger.info(
-        "Cron finished: retries %d ok / %d fail, pending %d ok / %d fail",
-        retry_ok, retry_fail, pending_ok, pending_fail,
+        "Cron finished: retries %d ok / %d fail, pending %d ok / %d fail, "
+        "backfill %d created / %d failed",
+        retry_ok, retry_fail, pending_ok, pending_fail, backfill_created, backfill_failed,
     )
     return 0
 

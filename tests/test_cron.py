@@ -466,13 +466,15 @@ class TestProcessPending:
 class TestMain:
 
     @freeze_time(_IN)
+    @patch("server.cron.process_webhook_backfill", return_value=(0, 0))
     @patch("server.cron.process_pending", return_value=(0, 0))
     @patch("server.cron.process_retries", return_value=(0, 0))
-    def test_returns_0_on_success(self, mock_r, mock_p):
+    def test_returns_0_on_success(self, mock_r, mock_p, mock_b):
         from server.cron import main
         assert main() == 0
         mock_r.assert_called_once()
         mock_p.assert_called_once()
+        mock_b.assert_called_once()
 
     @freeze_time(_IN)
     @patch("server.cron.process_retries", side_effect=RuntimeError("db gone"))
