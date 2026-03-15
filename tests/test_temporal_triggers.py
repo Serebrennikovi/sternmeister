@@ -4,10 +4,11 @@ Tests cover:
 - days_until → line mapping
 - STOP statuses blocking
 - deduplication
-- institution type by field
+- customer-facing institution normalization
+- AA -7 stage gate
 - weekday_name (all 7 days)
 - today computed in Berlin timezone
-- berater_day_minus_7 placeholder skip (no send, no DB)
+- berater_day_minus_7 active send path
 """
 
 import json
@@ -19,6 +20,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from freezegun import freeze_time
 
+from server.template_helpers import B2_CHECKLIST_TEXT, CUSTOMER_FACING_BERATER
 from server.utils import format_date_ru, weekday_name
 
 
@@ -209,6 +211,7 @@ def mock_cron_deps():
         kommo.extract_phone.return_value = "+4917612345678"
         kommo.extract_termin_date_dc.return_value = None
         kommo.extract_termin_date_aa.return_value = None
+        kommo.extract_time_termin.return_value = None
 
         messenger = MagicMock()
         mock_messenger.return_value = messenger
@@ -253,16 +256,28 @@ class TestProcessTemporalTriggers:
         process_temporal_triggers()
         mock_cron_deps["messenger"].send_message.assert_called_once()
         call_args = mock_cron_deps["messenger"].send_message.call_args
-        assert call_args[0][1].line == "berater_day_minus_3"
+        md = call_args[0][1]
+        assert md.line == "berater_day_minus_3"
+        assert md.schedule_text == "Суббота, 07.03.2026"
 
     def test_days_1_sends_berater_day_minus_1(self, mock_cron_deps):
         mock_cron_deps["kommo"].get_active_leads.return_value = [_make_lead(2, 93860331)]
         mock_cron_deps["kommo"].extract_termin_date_dc.return_value = date(2026, 3, 5)
         mock_cron_deps["kommo"].extract_termin_date_aa.return_value = None
+        mock_cron_deps["kommo"].extract_time_termin.return_value = " 14:45 "
         from server.cron import process_temporal_triggers
         process_temporal_triggers()
         call_args = mock_cron_deps["messenger"].send_message.call_args
-        assert call_args[0][1].line == "berater_day_minus_1"
+        md = call_args[0][1]
+        assert md.line == "berater_day_minus_1"
+        assert md.time == "14:45"
+        assert md.datetime_text == "05.03.2026 в 14:45"
+        call_kwargs = mock_cron_deps["create_message"].call_args.kwargs
+        values = json.loads(call_kwargs["template_values"])
+        assert values["name"] == "Иван Иванов"
+        assert values["date"] == "05.03.2026"
+        assert values["time"] == "14:45"
+        assert values["datetime_text"] == "05.03.2026 в 14:45"
 
     def test_days_0_sends_berater_day_0(self, mock_cron_deps):
         mock_cron_deps["kommo"].get_active_leads.return_value = [_make_lead(3, 93860331)]
@@ -273,23 +288,39 @@ class TestProcessTemporalTriggers:
         call_args = mock_cron_deps["messenger"].send_message.call_args
         assert call_args[0][1].line == "berater_day_0"
 
-    def test_days_7_does_not_send_message(self, mock_cron_deps, caplog):
-        """berater_day_minus_7: placeholder GUID → send_message NOT called, no DB record.
-
-        INFO log must contain lead_id and termin_date (M3 fix).
-        """
-        import logging
+    def test_days_7_sends_berater_day_minus_7(self, mock_cron_deps):
+        """berater_day_minus_7 is now active utility template and must be sent."""
         mock_cron_deps["kommo"].get_active_leads.return_value = [_make_lead(4, 93860331)]
         mock_cron_deps["kommo"].extract_termin_date_dc.return_value = date(2026, 3, 11)
         mock_cron_deps["kommo"].extract_termin_date_aa.return_value = None
         from server.cron import process_temporal_triggers
-        with caplog.at_level(logging.INFO, logger="server.cron"):
-            process_temporal_triggers()
-        mock_cron_deps["messenger"].send_message.assert_not_called()
-        mock_cron_deps["create_message"].assert_not_called()
-        # Verify INFO log contains lead_id=4 and termin_date="11.03.2026"
-        assert "4" in caplog.text
-        assert "11.03.2026" in caplog.text
+        process_temporal_triggers()
+        mock_cron_deps["messenger"].send_message.assert_called_once()
+        call_args = mock_cron_deps["messenger"].send_message.call_args
+        md = call_args[0][1]
+        assert md.line == "berater_day_minus_7"
+        assert md.checklist_text == B2_CHECKLIST_TEXT
+        call_kwargs = mock_cron_deps["create_message"].call_args.kwargs
+        values = json.loads(call_kwargs["template_values"])
+        assert values["name"] == "Иван Иванов"
+        assert values["institution"] == CUSTOMER_FACING_BERATER
+        assert values["date"] == "11.03.2026"
+        assert values["checklist_text"] == B2_CHECKLIST_TEXT
+        mock_cron_deps["create_message"].assert_called_once()
+
+    def test_days_7_uses_plaintext_checklist(self, mock_cron_deps):
+        mock_cron_deps["kommo"].get_active_leads.return_value = [_make_lead(40, 93860331)]
+        mock_cron_deps["kommo"].extract_termin_date_dc.return_value = date(2026, 3, 11)
+        mock_cron_deps["kommo"].extract_termin_date_aa.return_value = None
+        from server.cron import process_temporal_triggers
+        process_temporal_triggers()
+        call_args = mock_cron_deps["messenger"].send_message.call_args
+        md = call_args[0][1]
+        assert md.line == "berater_day_minus_7"
+        assert "Angebot от SternMeister" in md.checklist_text
+        call_kwargs = mock_cron_deps["create_message"].call_args.kwargs
+        values = json.loads(call_kwargs["template_values"])
+        assert "Angebot от SternMeister" in values["checklist_text"]
 
     def test_days_2_no_trigger(self, mock_cron_deps):
         mock_cron_deps["kommo"].get_active_leads.return_value = [_make_lead(5, 93860331)]
@@ -334,23 +365,41 @@ class TestProcessTemporalTriggers:
         process_temporal_triggers()
         mock_cron_deps["messenger"].send_message.assert_not_called()
 
-    def test_institution_dc_is_jobcenter(self, mock_cron_deps):
+    def test_institution_is_customer_facing_for_dc(self, mock_cron_deps):
         mock_cron_deps["kommo"].get_active_leads.return_value = [_make_lead(10, 93860331)]
         mock_cron_deps["kommo"].extract_termin_date_dc.return_value = date(2026, 3, 7)
         mock_cron_deps["kommo"].extract_termin_date_aa.return_value = None
         from server.cron import process_temporal_triggers
         process_temporal_triggers()
         call_args = mock_cron_deps["messenger"].send_message.call_args
-        assert call_args[0][1].institution == "Jobcenter"
+        assert call_args[0][1].institution == CUSTOMER_FACING_BERATER
 
-    def test_institution_aa_is_agentur(self, mock_cron_deps):
+    def test_institution_is_customer_facing_for_aa(self, mock_cron_deps):
         mock_cron_deps["kommo"].get_active_leads.return_value = [_make_lead(11, 93860331)]
         mock_cron_deps["kommo"].extract_termin_date_dc.return_value = None
         mock_cron_deps["kommo"].extract_termin_date_aa.return_value = date(2026, 3, 7)
         from server.cron import process_temporal_triggers
         process_temporal_triggers()
         call_args = mock_cron_deps["messenger"].send_message.call_args
-        assert call_args[0][1].institution == "Agentur für Arbeit"
+        assert call_args[0][1].institution == CUSTOMER_FACING_BERATER
+
+    def test_aa_day_minus_7_requires_allowed_status(self, mock_cron_deps):
+        mock_cron_deps["kommo"].get_active_leads.return_value = [_make_lead(112, 93860331)]
+        mock_cron_deps["kommo"].extract_termin_date_dc.return_value = None
+        mock_cron_deps["kommo"].extract_termin_date_aa.return_value = date(2026, 3, 11)
+        from server.cron import process_temporal_triggers
+        process_temporal_triggers()
+        mock_cron_deps["messenger"].send_message.assert_not_called()
+
+    def test_aa_day_minus_7_sends_on_allowed_stage(self, mock_cron_deps):
+        mock_cron_deps["kommo"].get_active_leads.return_value = [_make_lead(113, 102183943)]
+        mock_cron_deps["kommo"].extract_termin_date_dc.return_value = None
+        mock_cron_deps["kommo"].extract_termin_date_aa.return_value = date(2026, 3, 11)
+        from server.cron import process_temporal_triggers
+        process_temporal_triggers()
+        call_args = mock_cron_deps["messenger"].send_message.call_args
+        assert call_args[0][1].line == "berater_day_minus_7"
+        assert call_args[0][1].institution == CUSTOMER_FACING_BERATER
 
     def test_both_dc_and_aa_processed_independently(self, mock_cron_deps):
         """One lead with both ДЦ in 3 days and АА in 1 day → 2 messages."""
@@ -457,6 +506,7 @@ class TestProcessTemporalTriggers:
         md = call_args[0][1]
         assert md.weekday == "Суббота"
         assert md.date == "07.03.2026"
+        assert md.schedule_text == "Суббота, 07.03.2026"
 
     def test_template_values_saved_to_db(self, mock_cron_deps):
         """template_values JSON saved in create_message call."""

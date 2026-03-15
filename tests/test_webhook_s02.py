@@ -1,10 +1,12 @@
-"""Tests for S02 webhook changes: gosniki_consultation_done, berater_accepted (T12)."""
+"""Tests for S02 webhook changes: gosniki_consultation_done, berater_accepted."""
 
 import json
+from datetime import date
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from freezegun import freeze_time
 
 from server.app import app
 from server.config import determine_line
@@ -122,7 +124,9 @@ class TestGosnikWebhook:
         call_kw = mock_create.call_args.kwargs
         assert call_kw["line"] == "gosniki_consultation_done"
         assert call_kw["termin_date"] == ""  # no termin_date → ""
-        assert call_kw["template_values"] == json.dumps(["Иван Петров"])
+        values = json.loads(call_kw["template_values"])
+        assert values["name"] == "Иван Петров"
+        assert "Иван Петров" in values["news_text"]
 
     @patch("server.app.get_kommo_client")
     @patch("server.app.get_webhook_line_exists", return_value=False)
@@ -191,7 +195,7 @@ class TestBeraterAcceptedWebhook:
         self, mock_window, mock_exists, mock_create,
         mock_get_messenger, mock_get_kommo, client,
     ):
-        """Berater accepted webhook: line=berater_accepted, template_values=[name]."""
+        """Berater accepted webhook: line=berater_accepted, keyed template_values."""
         kommo = MagicMock()
         contact = _make_contact(name="Мария Шмидт")
         kommo.get_lead_contact.return_value = (
@@ -199,7 +203,9 @@ class TestBeraterAcceptedWebhook:
         )
         kommo.extract_phone.return_value = "+491234567890"
         kommo.extract_name.return_value = "Мария Шмидт"
-        kommo.extract_termin_date.return_value = "01.04.2026"
+        kommo.extract_termin_date_dc.return_value = date(2026, 4, 1)
+        kommo.extract_termin_date_aa.return_value = None
+        kommo.extract_time_termin.return_value = "10:30"
         mock_get_kommo.return_value = kommo
 
         messenger = MagicMock()
@@ -215,7 +221,120 @@ class TestBeraterAcceptedWebhook:
 
         call_kw = mock_create.call_args.kwargs
         assert call_kw["line"] == "berater_accepted"
-        assert call_kw["template_values"] == json.dumps(["Мария Шмидт"])
+        values = json.loads(call_kw["template_values"])
+        assert values["name"] == "Мария Шмидт"
+        assert values == {"name": "Мария Шмидт"}
+
+    @freeze_time("2026-03-10 10:00:00", tz_offset=0)
+    @patch("server.app.get_kommo_client")
+    @patch("server.app.get_messenger")
+    @patch("server.app.create_message", return_value=22)
+    @patch("server.app.get_webhook_line_exists", return_value=False)
+    @patch("server.app.is_in_send_window", return_value=True)
+    def test_berater_accepted_with_both_dates_picks_closest(
+        self, mock_window, mock_exists, mock_create,
+        mock_get_messenger, mock_get_kommo, client,
+    ):
+        """When both dates are set, nearest date wins (AA in this case)."""
+        kommo = MagicMock()
+        contact = _make_contact(name="Макс Мюллер")
+        kommo.get_lead_contact.return_value = (
+            _make_lead(pipeline_id=12154099, status_id=93860331), contact
+        )
+        kommo.extract_phone.return_value = "+491234567890"
+        kommo.extract_name.return_value = "Макс Мюллер"
+        kommo.extract_termin_date_dc.return_value = date(2026, 3, 20)  # 10 days
+        kommo.extract_termin_date_aa.return_value = date(2026, 3, 12)  # 2 days
+        kommo.extract_time_termin.return_value = None
+        mock_get_kommo.return_value = kommo
+
+        messenger = MagicMock()
+        messenger.build_message_text.return_value = "[template] Макс Мюллер"
+        messenger.send_message.return_value = {"message_id": "msg-b1-closest"}
+        mock_get_messenger.return_value = messenger
+
+        resp = client.post("/webhook/kommo", json=_payload(
+            status_id=93860331, pipeline_id=12154099,
+        ))
+        result = _single_result(resp)
+        assert result["message_id"] == 22
+
+        values = json.loads(mock_create.call_args.kwargs["template_values"])
+        assert values == {"name": "Макс Мюллер"}
+
+    @patch("server.app.get_kommo_client")
+    @patch("server.app.get_messenger")
+    @patch("server.app.create_message", return_value=23)
+    @patch("server.app.get_webhook_line_exists", return_value=False)
+    @patch("server.app.is_in_send_window", return_value=True)
+    def test_berater_accepted_without_dates_uses_fallback_texts(
+        self, mock_window, mock_exists, mock_create,
+        mock_get_messenger, mock_get_kommo, client,
+    ):
+        """When both DC/AA dates are missing, B1 still sends name-only payload."""
+        kommo = MagicMock()
+        contact = _make_contact(name="Франц Беккер")
+        kommo.get_lead_contact.return_value = (
+            _make_lead(pipeline_id=12154099, status_id=93860331), contact
+        )
+        kommo.extract_phone.return_value = "+491234567890"
+        kommo.extract_name.return_value = "Франц Беккер"
+        kommo.extract_termin_date_dc.return_value = None
+        kommo.extract_termin_date_aa.return_value = None
+        kommo.extract_time_termin.return_value = "   "
+        mock_get_kommo.return_value = kommo
+
+        messenger = MagicMock()
+        messenger.build_message_text.return_value = "[template] Франц Беккер"
+        messenger.send_message.return_value = {"message_id": "msg-b1-fallback"}
+        mock_get_messenger.return_value = messenger
+
+        resp = client.post("/webhook/kommo", json=_payload(
+            status_id=93860331, pipeline_id=12154099,
+        ))
+        result = _single_result(resp)
+        assert result["message_id"] == 23
+
+        values = json.loads(mock_create.call_args.kwargs["template_values"])
+        assert values == {"name": "Франц Беккер"}
+
+    @freeze_time("2026-03-10 10:00:00", tz_offset=0)
+    @patch("server.app.get_kommo_client")
+    @patch("server.app.get_messenger")
+    @patch("server.app.create_message", return_value=24)
+    @patch("server.app.get_webhook_line_exists", return_value=False)
+    @patch("server.app.is_in_send_window", return_value=True)
+    def test_berater_accepted_with_active_temporal_state_is_marked_skipped(
+        self, mock_window, mock_exists, mock_create,
+        mock_get_messenger, mock_get_kommo, client,
+    ):
+        kommo = MagicMock()
+        contact = _make_contact(name="Эмма Вольф")
+        kommo.get_lead_contact.return_value = (
+            _make_lead(pipeline_id=12154099, status_id=93860331), contact
+        )
+        kommo.extract_phone.return_value = "+491234567890"
+        kommo.extract_name.return_value = "Эмма Вольф"
+        kommo.extract_termin_date_dc.return_value = None
+        kommo.extract_termin_date_aa.return_value = date(2026, 3, 13)  # +3 days
+        kommo.extract_time_termin.return_value = None
+        mock_get_kommo.return_value = kommo
+
+        messenger = MagicMock()
+        messenger.build_message_text.return_value = "[template] Эмма Вольф"
+        mock_get_messenger.return_value = messenger
+
+        resp = client.post("/webhook/kommo", json=_payload(
+            status_id=93860331, pipeline_id=12154099,
+        ))
+        result = _single_result(resp)
+
+        assert "Stale berater_accepted skipped" in result["message"]
+        messenger.send_message.assert_not_called()
+        call_kw = mock_create.call_args.kwargs
+        assert call_kw["status"] == "failed"
+        values = json.loads(call_kw["template_values"])
+        assert values == {"name": "Эмма Вольф"}
 
     @patch("server.app.get_kommo_client")
     @patch("server.app.get_webhook_line_exists", return_value=False)

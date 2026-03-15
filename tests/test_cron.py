@@ -4,9 +4,10 @@ Uses a real SQLite DB (temp file from conftest) with table cleanup between
 tests for isolation.  Messenger is mocked to avoid HTTP calls.
 
 CET (winter) = UTC+1 — February 2026.
-Send window: 9:00-21:00 Berlin = 08:00-20:00 UTC in winter.
+Send window: 8:00-22:00 Berlin = 07:00-21:00 UTC in winter.
 """
 
+import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -62,9 +63,10 @@ def _future(hours: int = 24) -> str:
 
 
 def _create_sent(*, attempts=1, next_retry_at=None, phone="+491234567890",
-                 line="first", termin_date="25.02.2026") -> int:
+                 line="berater_day_minus_7", termin_date="25.02.2026",
+                 kommo_lead_id=100) -> int:
     return create_message(
-        kommo_lead_id=100, kommo_contact_id=200, phone=phone,
+        kommo_lead_id=kommo_lead_id, kommo_contact_id=200, phone=phone,
         line=line, termin_date=termin_date, message_text="Test",
         status="sent", attempts=attempts, sent_at=_past(25),
         next_retry_at=next_retry_at or _past(1),
@@ -74,14 +76,14 @@ def _create_sent(*, attempts=1, next_retry_at=None, phone="+491234567890",
 def _create_failed(*, attempts=1, next_retry_at=None) -> int:
     return create_message(
         kommo_lead_id=100, kommo_contact_id=200, phone="+491234567890",
-        line="first", termin_date="25.02.2026", message_text="Test",
+        line="berater_day_minus_7", termin_date="25.02.2026", message_text="Test",
         status="failed", attempts=attempts,
         next_retry_at=next_retry_at or _past(1),
     )
 
 
 def _create_pending(*, next_retry_at=None, phone="+491234567890",
-                    line="first", termin_date="25.02.2026") -> int:
+                    line="berater_day_minus_7", termin_date="25.02.2026") -> int:
     return create_message(
         kommo_lead_id=100, kommo_contact_id=200, phone=phone,
         line=line, termin_date=termin_date, message_text="Test pending",
@@ -109,7 +111,7 @@ class TestProcessRetries:
         m.send_message.return_value = {"message_id": "wz-r1"}
         mock_gm.return_value = m
 
-        msg_id = _create_sent(attempts=1)
+        msg_id = _create_sent(attempts=1, line="gosniki_consultation_done")
 
         from server.cron import process_retries
         ok, fail = process_retries()
@@ -172,7 +174,7 @@ class TestProcessRetries:
 
     @freeze_time(_OUT)
     def test_outside_window_skips(self):
-        """Outside 9-21 Berlin → skip."""
+        """Outside 8-22 Berlin → skip."""
         _create_sent()
 
         from server.cron import process_retries
@@ -213,8 +215,8 @@ class TestProcessRetries:
         m.send_message.side_effect = send
         mock_gm.return_value = m
 
-        id1 = _create_sent(phone="+491111111111")
-        id2 = _create_sent(phone="+492222222222")
+        id1 = _create_sent(phone="+491111111111", kommo_lead_id=101)
+        id2 = _create_sent(phone="+492222222222", kommo_lead_id=102)
 
         from server.cron import process_retries
         ok, fail = process_retries()
@@ -241,8 +243,8 @@ class TestProcessRetries:
         m.send_message.side_effect = send
         mock_gm.return_value = m
 
-        id1 = _create_sent(phone="+491111111111")
-        id2 = _create_sent(phone="+492222222222")
+        id1 = _create_sent(phone="+491111111111", kommo_lead_id=101)
+        id2 = _create_sent(phone="+492222222222", kommo_lead_id=102)
 
         from server.cron import process_retries
         ok, fail = process_retries()
@@ -260,21 +262,48 @@ class TestProcessRetries:
 
     @freeze_time(_IN)
     @patch("server.cron.get_messenger")
-    def test_second_line_retry(self, mock_gm):
-        """line='second' messages are retried with correct MessageData."""
+    def test_stale_berater_accepted_is_marked_skipped(
+        self, mock_gm, _mock_kommo_client,
+    ):
+        """Retry must not resend stale Б1 when a later temporal state is already active."""
         m = MagicMock()
-        m.send_message.return_value = {"message_id": "wz-s2"}
         mock_gm.return_value = m
 
-        msg_id = _create_sent(line="second", termin_date="01.03.2026")
+        msg_id = create_message(
+            kommo_lead_id=100,
+            kommo_contact_id=200,
+            phone="+491234567890",
+            line="berater_accepted",
+            termin_date="27.02.2026",
+            message_text="Test",
+            status="sent",
+            attempts=1,
+            sent_at=_past(25),
+            next_retry_at=_past(1),
+            template_values=json.dumps({
+                "name": "Анна",
+                "institution": "Jobcenter",
+                "date": "27.02.2026",
+                "time": "",
+                "topic": "термин в Jobcenter",
+                "datetime_text": "27.02.2026",
+                "location_text": "в Jobcenter",
+            }),
+        )
+
+        kommo = _mock_kommo_client.return_value
+        kommo.get_lead_with_contacts.return_value = {"id": 100, "status_id": 93860331}
+        kommo.extract_termin_date_dc.return_value = None
+        kommo.extract_termin_date_aa.return_value = datetime(2026, 2, 27).date()
 
         from server.cron import process_retries
-        process_retries()
+        ok, fail = process_retries()
 
-        args = m.send_message.call_args
-        assert args[0][1].line == "second"
-        assert args[0][1].termin_date == "01.03.2026"
-        assert get_message_by_id(msg_id)["attempts"] == 2
+        assert (ok, fail) == (0, 0)
+        row = get_message_by_id(msg_id)
+        assert row["status"] == "failed"
+        assert row["next_retry_at"] is None
+        m.send_message.assert_not_called()
 
     @freeze_time(_IN)
     @patch("server.cron.get_kommo_client")
@@ -377,7 +406,7 @@ class TestProcessPending:
         # MAX_RETRY_ATTEMPTS=2, max_attempts=3, so attempts=2 -> next fail -> 3 >= 3 -> failed
         msg_id = create_message(
             kommo_lead_id=100, kommo_contact_id=200, phone="+491234567890",
-            line="first", termin_date="25.02.2026", message_text="Test pending",
+            line="gosniki_consultation_done", termin_date="25.02.2026", message_text="Test pending",
             status="pending", attempts=2,
             next_retry_at=_past(1),
         )
@@ -391,14 +420,22 @@ class TestProcessPending:
         assert row["attempts"] == 3
 
     @freeze_time(_OUT)
-    def test_outside_window_skips(self):
-        """Outside 9-21 → skip."""
-        _create_pending()
+    @patch("server.cron.get_messenger")
+    def test_outside_window_still_sends_when_eligible(self, mock_gm):
+        """Pending send ignores current window and uses next_retry_at eligibility."""
+        m = MagicMock()
+        m.send_message.return_value = {"message_id": "wz-p-out"}
+        mock_gm.return_value = m
+
+        msg_id = _create_pending()
 
         from server.cron import process_pending
         ok, fail = process_pending()
 
-        assert (ok, fail) == (0, 0)
+        assert (ok, fail) == (1, 0)
+        row = get_message_by_id(msg_id)
+        assert row["status"] == "sent"
+        assert row["messenger_id"] == "wz-p-out"
 
     @freeze_time(_IN)
     @patch("server.cron.get_messenger")
@@ -421,6 +458,50 @@ class TestProcessPending:
         from server.cron import process_pending
         ok, fail = process_pending()
         assert (ok, fail) == (0, 0)
+
+    @freeze_time(_IN)
+    @patch("server.cron.get_messenger")
+    def test_stale_berater_accepted_pending_is_marked_skipped(
+        self, mock_gm, _mock_kommo_client,
+    ):
+        """Pending must not send stale Б1 when a later temporal state is already active."""
+        m = MagicMock()
+        mock_gm.return_value = m
+
+        msg_id = create_message(
+            kommo_lead_id=100,
+            kommo_contact_id=200,
+            phone="+491234567890",
+            line="berater_accepted",
+            termin_date="27.02.2026",
+            message_text="Test pending",
+            status="pending",
+            attempts=0,
+            next_retry_at=_past(1),
+            template_values=json.dumps({
+                "name": "Анна",
+                "institution": "Jobcenter",
+                "date": "27.02.2026",
+                "time": "",
+                "topic": "термин в Jobcenter",
+                "datetime_text": "27.02.2026",
+                "location_text": "в Jobcenter",
+            }),
+        )
+
+        kommo = _mock_kommo_client.return_value
+        kommo.get_lead_with_contacts.return_value = {"id": 100, "status_id": 93860331}
+        kommo.extract_termin_date_dc.return_value = None
+        kommo.extract_termin_date_aa.return_value = datetime(2026, 2, 27).date()
+
+        from server.cron import process_pending
+        ok, fail = process_pending()
+
+        assert (ok, fail) == (0, 0)
+        row = get_message_by_id(msg_id)
+        assert row["status"] == "failed"
+        assert row["next_retry_at"] is None
+        m.send_message.assert_not_called()
 
     @freeze_time(_IN)
     @patch("server.cron.get_kommo_client")

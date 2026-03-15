@@ -16,7 +16,6 @@ _5XX_RETRY_DELAY = 1  # seconds between 5xx retries
 
 # All valid line values — must match TEMPLATE_MAP keys in config.py
 _VALID_LINES = frozenset({
-    "first", "second",
     "gosniki_consultation_done", "berater_accepted",
     "berater_day_minus_7", "berater_day_minus_3",
     "berater_day_minus_1", "berater_day_0",
@@ -33,9 +32,17 @@ class MessageData:
     line: str           # одно из значений _VALID_LINES
     termin_date: str    # "25.02.2026" (DD.MM.YYYY) или "" для Г1/Б1
     name: str | None = field(default=None)          # имя клиента ({{1}} в S02-шаблонах)
-    institution: str | None = field(default=None)   # "Jobcenter" / "Agentur für Arbeit"
+    news_text: str | None = field(default=None)     # Г1: customer-facing текст новости
+    institution: str | None = field(default=None)   # S02: customer-facing "с Бератором"
     weekday: str | None = field(default=None)       # "Понедельник", "Вторник", ...
     date: str | None = field(default=None)          # дата термина для шаблона "DD.MM.YYYY"
+    time: str | None = field(default=None)          # время термина "HH:MM" / optional
+    checklist_text: str | None = field(default=None)  # Б2: checklist block
+    schedule_text: str | None = field(default=None)   # Б3: "Среда, 19.03.2026"
+    topic: str | None = field(default=None)           # legacy B1 compatibility
+    subject_text: str | None = field(default=None)    # legacy B4 compatibility
+    datetime_text: str | None = field(default=None)   # Б4: дата или дата+время
+    location_text: str | None = field(default=None)   # legacy B1 compatibility
 
     def __post_init__(self):
         if self.line not in _VALID_LINES:
@@ -76,7 +83,6 @@ class WazzupMessenger:
 
         S01 lines: full template text.
         S02 lines: "[template] var1, var2, ..."  (exact template text unavailable).
-        berater_day_minus_7 (заглушка): "[berater_day_minus_7] (placeholder)".
 
         Pass pre-computed ``template_values`` (from send_message) to avoid
         calling vars_fn twice on the same send.
@@ -86,7 +92,7 @@ class WazzupMessenger:
             entry = TEMPLATE_MAP.get(message_data.line, {})
             vars_fn = entry.get("vars")
             if vars_fn is None:
-                return f"[{message_data.line}] (placeholder)"
+                return f"[{message_data.line}] (disabled)"
             template_values = vars_fn(**dataclasses.asdict(message_data))
         return f"[template] {', '.join(str(v) for v in template_values)}"
 
@@ -100,7 +106,7 @@ class WazzupMessenger:
 
         Returns:
             {"message_id": "...", "status": "sent", "message_text": "..."}
-            или {"status": "skipped"} если template_guid is None (заглушка Б2).
+            или {"status": "skipped"} если template_guid is None (служебный fallback).
 
         Raises:
             MessengerError: при любой ошибке отправки
@@ -114,10 +120,10 @@ class WazzupMessenger:
         template_guid = entry["template_guid"]
         vars_fn = entry["vars"]
 
-        # Заглушка (berater_day_minus_7): шаблон не прошёл WABA → пропустить
+        # Fallback for intentionally disabled templates.
         if template_guid is None:
             logger.info(
-                "Template for line=%s is placeholder (no GUID), skipping. "
+                "Template for line=%s is disabled (no GUID), skipping. "
                 "termin_date=%s",
                 message_data.line, message_data.termin_date,
             )

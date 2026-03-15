@@ -435,7 +435,7 @@ class TestCronAlerterIntegration:
         from server.messenger import MessengerError
 
         mock_gmr.return_value = [
-            {"id": 1, "phone": "+491234567890", "line": "first",
+            {"id": 1, "phone": "+491234567890", "line": "gosniki_consultation_done",
              "termin_date": "25.02.2026", "attempts": 1, "kommo_lead_id": 100,
              "template_values": None},
         ]
@@ -464,7 +464,7 @@ class TestCronAlerterIntegration:
         from server.messenger import MessengerError
 
         mock_gpm.return_value = [
-            {"id": 2, "phone": "+499876543210", "line": "second",
+            {"id": 2, "phone": "+499876543210", "line": "berater_day_minus_7",
              "termin_date": "01.03.2026", "attempts": 0, "kommo_lead_id": 200,
              "template_values": None},
         ]

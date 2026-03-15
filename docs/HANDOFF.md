@@ -1,33 +1,32 @@
 # HANDOFF — WhatsApp Auto-notifications (Sternmeister)
 
-**Последнее обновление:** 06.03.2026 (добавлена T15 stabilization для S02)
+**Последнее обновление:** 15.03.2026 (legacy S01 линии удалены из кода)
 
 ---
 
 ## Текущий статус
 
-**S01 завершена, S02 в stabilization.** Базовая цепочка S02 в продакшене работает, но открыт production gap: автосозданные сделки могут не проходить webhook-путь и пропускать отправку.
+**S01 и S02 завершены.** Обе спецификации закрыты, все задачи выполнены. Система работает в продакшене на Hetzner (65.108.154.202).
 
 ---
 
+## Следующие шаги
+
+Нет активных задач. При необходимости создать новую спецификацию S03.
 
 ---
 
-## Завершённые спецификации
+## Спецификации
 
-### S02: Расширение системы уведомлений 🛠 stabilization
+### S02: Расширение системы уведомлений ✅ done
 
-Цепочка из 6 WABA-сообщений — 2 webhook (Г1, Б1) + 4 temporal (B3-B5 по дате термина ДЦ и АА).
+Цепочка из 6 WABA-сообщений — 2 webhook (Г1, Б1) + 4 temporal (Б2-Б5 по дате термина ДЦ и АА).
 
 Файл: [S02_notifications_expansion_done.md](2.%20specifications/S02_notifications_expansion_done.md)
 
-**Задачи:** T12 ✅ (config + schema + webhook) → T13 ✅ (temporal triggers) → T14 ✅ (deploy to production) → T15 ⏳ (fail-safe backfill webhook-линий)
+**Задачи (все ✅):** T12 (config + schema + webhook) → T13 (temporal triggers) → T14 (deploy) → T15 (fail-safe backfill) → T16 (utility-only серия) → T17 (customer-facing text/template cleanup + send window `08:00-22:00`)
 
-**Статус:** Развёрнута на production (Hetzner 65.108.154.202). Идёт стабилизация через T15.
-
-**Открытые вопросы:**
-- WABA-шаблон Б2 "За 7 дней" не одобрен, деплоится с заглушкой
-- Автосозданные child-лиды могут не генерировать webhook `status_changed` для Б1, поэтому не создаётся запись в `messages` (T15)
+Файлы задач: [docs/3. tasks/Done/S02_notifications_expansion_done/](3.%20tasks/Done/S02_notifications_expansion_done/)
 
 ### S01: WhatsApp Auto-notifications ✅ done
 
@@ -60,7 +59,8 @@
 - [x] API-ключ — сохранён в `.env`
 - [x] Channel ID — сохранён в `.env`
 - [x] Номер: +49 3046690188
-- [x] WABA шаблоны: 9 одобренных доступны
+- [x] WABA шаблоны: approved templates доступны; финальная серия S02 подтверждена 13.03.2026
+- [x] Доступ к редактированию и проверке Wazzup-шаблонов — получен
 
 ### Инфраструктура
 - [x] Сервер: Hetzner 65.108.154.202
@@ -94,6 +94,81 @@
 ---
 
 ## История изменений
+
+### 2026-03-15 — Legacy S01 линии удалены из кода
+- Удалены `first`/`second` из `TEMPLATE_MAP`, `_VALID_LINES`, `.env.example` (убран `WAZZUP_TEMPLATE_ID`).
+- Legacy шаблон `SternMeister_first_message` (GUID `08541939-...`) больше не может быть отправлен — код отвергнет линии `first`/`second` с `ValueError`.
+- Тесты обновлены: 310 passed, 1 skipped.
+
+### 2026-03-14 — T17 акцептована, S02 завершена
+- T17: customer-facing text/template cleanup + send window `08:00-22:00` — выполнена. 313 тестов (0 failed).
+- Два ревью-цикла: найден и исправлен HIGH (dict-path retry Б2/Б3 не форсировал `CUSTOMER_FACING_BERATER`), добавлен `_non_empty` для Б5, добавлены тесты keyed dict retry.
+- Файл задачи T17 → `Done/S02_notifications_expansion_done/`. Папка `S02_notifications_expansion/` удалена (пуста).
+- **Все 6 задач S02 (T12-T17) выполнены. Спецификация S02 закрыта.**
+
+### 2026-03-13 — T17: Wazzup sync завершён, GUID-ы посажены в код
+- Через `GET /templates/whatsapp` подтверждены финальные approved GUID: Г1 `95ddec60-bb6b-44a8-b5fb-a98abd76f974`, Б1 `47d2946c-f66a-4697-b702-eb5d138bb1f1`, Б2 `b028964c-9c27-4bc9-9b97-02a5e283df16`, Б3 `e1cb07aa-5236-4f8a-84dc-fef26b3cccf6`, Б4 `a9b04e05-6b6c-4a5f-9463-d8a0d96316f4`, Б5 `176a8b5b-8704-4d04-aee5-0fbd08641806`.
+- `server/config.py`, `server/app.py`, `server/cron.py`, `server/template_helpers.py`, `server/messenger/wazzup.py` синхронизированы под реальные contracts:
+  - Г1 — 2 vars (`SternMeister`, `news_text`)
+  - Б1 — 1 var (`name`)
+  - Б2 — 4 vars (`name`, `date`, `institution`, `checklist_text`)
+  - Б3 — 3 vars (`name`, `institution`, `schedule_text`) + quick reply `Нужна помощь`
+  - Б4 — 2 vars (`name`, `datetime_text`) + quick reply `Да, буду` / `Нет, не смогу`
+- Targeted Docker suite по S02 sync: `198 passed`.
+- До акцепта T17 остаётся только optional render-check на whitelist-номере.
+
+### 2026-03-13 — T17: repo-side часть реализована, manual Wazzup sync остаётся
+- `server/template_helpers.py`: введён единый customer-facing контракт S02 (`с Бератором`, `запросу`, без `назначенное время`), helper для AA `-7` gate и stale-state detection для Б1.
+- `server/app.py`: webhook Б1 больше не отправляется при уже активном более позднем temporal-state; создаётся терминальный DB marker без retry.
+- `server/cron.py`: retry/pending/backfill нормализуют legacy/template_values в новые customer-facing тексты, backfill Г1 переведён на keyed payload, stale Б1 больше не досылается, Б2 по АА уходит только на этапах `102183943/102183947`.
+- `tests/`: обновлены unit/integration/e2e проверки; Docker-прогон `pytest tests -q` → `312 passed`.
+- Полностью закрыть T17 нельзя без ручных правок в Wazzup UI и финального GUID sync.
+
+### 2026-03-13 — T16 акцептована, создана T17 (customer-facing text/template cleanup)
+- T16 переведена в `done` и перемещена в `docs/3. tasks/Done/S02_notifications_expansion_done/`.
+- Создана T17: одна консолидированная задача на правки customer-facing текстов S02 и Wazzup-шаблонов.
+- В T17 зафиксированы требования: вернуть поздравительный Б1, заменить customer-facing `Jobcenter`/`Agentur für Arbeit`/`AA` на `с Бератором`, убрать `назначенное время`, лишнее `в` перед датой, исправить `в это`/`Хотели`, убрать квадраты/точки от bullet-символов и сдвинуть send window на `08:00-22:00 Europe/Berlin`.
+
+### 2026-03-11 — hotfix: full utility-only для S02 + pending-cron fix
+- `server/config.py`: Г1 (`gosniki_consultation_done`) переключён с marketing-template на промежуточный utility-template как этап до final T17 sync.
+- `server/cron.py`: в `process_pending()` удалён дополнительный `is_in_send_window()` gate; pending-сообщения отправляются по факту `next_retry_at <= now`.
+- Тесты обновлены под новый GUID Г1 и новую pending-логику.
+- Проверка: `pytest tests` → `300 passed`.
+
+### 2026-03-10 — T16 реализована в кодовой базе (ожидает акцепта)
+- `server/config.py`: Б1/Б2/Б4 переведены на utility-only шаблоны как промежуточный этап до final T17 sync.
+- `server/kommo.py`: добавлен `extract_time_termin()` (`field_id=886670` → `HH:MM` Europe/Berlin).
+- `server/app.py`: Б1 переведена на winner-алгоритм DC/AA + keyed `template_values` + fallback-safe composite поля.
+- `server/cron.py`: Б2 включён как реальная temporal-отправка; Б4 использует line-specific composite поля; backfill Б1 обновлён на utility-only шаблон.
+- `cron._build_message_data()`: добавлена legacy-реконструкция Б1 (`template_values=[name]`) без `None` в template-переменных.
+- Тесты: `pytest tests` → `274 passed`.
+
+### 2026-03-10 — создана T16 (utility-only серия S02)
+- Зафиксирован customer-facing кейс: на одном и том же номере доходят UTILITY (Б3/Б5), но не всегда доходят MARKETING (Б1/Б4), при том что отправка API-уровня успешна (`sent` + `messenger_id` в БД).
+- В Wazzup подтверждён статус approved для промежуточного utility-шаблона Б2, при этом в коде Б2 на тот момент ещё оставался заглушкой (`template_guid=None`).
+- Создана задача T16: перевод S02-цепочки на utility-only шаблоны и включение Б2 в рабочую серию.
+
+### 2026-03-10 — T16 уточнена после QA-фидбэка
+- Добавлен реестр категорий/статусов шаблонов Г1 и Б1-Б5 по факту `GET /v3/templates/whatsapp` (снимок 10.03.2026).
+- Для Б1/Б2/Б4 зафиксированы непустые fallback-значения всех template-переменных.
+- Формализовано извлечение `time_termin` (`field_id=886670`): Unix timestamp → `HH:MM` (Europe/Berlin), с fallback при невалидном значении.
+- В задаче явно описан маппинг `MessageData`/`template_values` для retry и восстановление в cron.
+- Добавлены explicit diff-секции для `app.py` и `cron.py`, line-specific `template_values_json` (Б2/Б3/Б4), а также секция `Migration/Deployment` для legacy Б1 записей в retry-очереди.
+- Исправлен fallback времени для Б2 на грамматически корректный (`назначенное время`) и добавлены тест-кейсы на retry для keyed и legacy Б1.
+
+### 2026-03-10 — T16 дополнительно уточнена по второму ревью
+- Добавлен explicit diff для `process_webhook_backfill()` по Б1 (4-переменный utility-шаблон, keyed `template_values`, запрет `None`).
+- Устранено противоречие `time` vs `time_text`: зафиксировано, что в `MessageData.time`/БД хранится fallback-applied значение, а не сырой `None`.
+- Детализирована legacy-реконструкция Б1 (`template_values=[name]`) фиксированными fallback-строками для composite customer-facing полей.
+- Зафиксировано правило source-consistency для Б1: `date_for_template` берётся из того же winner-поля DC/AA, что и `institution`.
+- Добавлены примечания по операционным рискам (shared legacy-template B4, рассинхрон `886670`, quick-reply в новом Б4) и тест-пункт на backfill Б1.
+
+### 2026-03-06 — T15 акцептована, S02 stabilization завершена
+- cron.py: process_webhook_backfill() — fail-safe backfill для Г1/Б1, record-before-send паттерн, IntegrityError dedup, MessengerError→failed, _WEBHOOK_BACKFILL_TARGETS
+- db.py: get_webhook_line_exists(), idx_dedup_webhook_lines (partial unique index на kommo_lead_id, line для webhook-линий)
+- app.py: lifetime dedup через get_webhook_line_exists() для webhook-линий (вместо time-based), IntegrityError catch на всех create_message()
+- 4 новых тест-файла (unit + integration backfill), обновлены test_webhook_s02, test_alerts, test_webhook, test_cron, test_db_s02
+- 272 теста (0 failed, 1 skipped), 3 ревью-цикла; закрыты H1 (IntegrityError в webhook handler) + H2 (send-before-record → record-before-send)
 
 ### 2026-03-04 — T13 акцептована
 - kommo.py: get_active_leads() (пагинация 250/стр, with=contacts), extract_termin_date_dc(), extract_termin_date_aa(), _extract_date_from_field()

@@ -1,9 +1,9 @@
 # Функциональная спецификация: Расширение системы уведомлений
 
 **ID:** S02
-**Статус:** active
-**Версия:** 2.5
-**Дата:** 2026-03-04
+**Статус:** done
+**Версия:** 3.6
+**Дата:** 2026-03-14
 **Автор:** Иван Серебренников
 
 ---
@@ -13,6 +13,29 @@
 Расширить систему WhatsApp-уведомлений (S01) для поддержки полного жизненного цикла клиента в воронках "Бух Бератер" и "Бух Гос". S01 отправляет 1 тип сообщения при смене этапа. S02 добавляет цепочку из 6 сообщений, привязанных к дате термина и этапу воронки, с защитой от ложных срабатываний при отмене/переносе.
 
 Бизнес-цель: снизить 70% отвал клиентов между этапами подготовки и прохождения термина.
+
+### Апдейт T17 final sync (13.03.2026)
+
+- Send window сервиса переведён на `08:00-22:00 Europe/Berlin`.
+- Customer-facing template contract унифицирован до `с Бератором`; legacy `Jobcenter` / `Agentur für Arbeit` / `AA` не должны попадать в новые `templateValues`, retry/backfill или логируемый `message_text`.
+- Через Wazzup API подтверждены финальные approved GUID:
+  - Г1 `gosniki_consultation_done` → `95ddec60-bb6b-44a8-b5fb-a98abd76f974`
+  - Б1 `berater_accepted` → `47d2946c-f66a-4697-b702-eb5d138bb1f1`
+  - Б2 `berater_day_minus_7` → `b028964c-9c27-4bc9-9b97-02a5e283df16`
+  - Б3 `berater_day_minus_3` → `e1cb07aa-5236-4f8a-84dc-fef26b3cccf6`
+  - Б4 `berater_day_minus_1` → `a9b04e05-6b6c-4a5f-9463-d8a0d96316f4`
+  - Б5 `berater_day_0` остаётся `176a8b5b-8704-4d04-aee5-0fbd08641806`
+- Финальные контракты переменных:
+  - Г1: 2 vars (`SternMeister`, `news_text`)
+  - Б1: 1 var (`name`)
+  - Б2: 4 vars (`name`, `date`, `institution`, `checklist_text`)
+  - Б3: 3 vars (`name`, `institution`, `schedule_text`) + quick reply `Нужна помощь`
+  - Б4: 2 vars (`name`, `datetime_text`) + quick reply `Да, буду` / `Нет, не смогу`
+- Retry/pending/backfill нормализуют legacy `template_values` в этот финальный контракт, а stale Б1 (`berater_accepted`) терминально гасится, если у сделки уже активен более поздний temporal-state (`-3/-1/0`).
+- Для Б2 по АА действует stage-gate: `berater_day_minus_7` уходит только на этапах `102183943` / `102183947`; по одной дате без нужного этапа сообщение не отправляется.
+- Manual Wazzup создание и approval шаблонов завершены; до финального акцепта T17 остаётся только optional render-check на whitelist-номере.
+
+> Ниже остаются исторические разделы T12-T16. Если они противоречат этому блоку, актуальным считается именно этот блок T17 final sync.
 
 ---
 
@@ -24,7 +47,7 @@
 - Webhook-триггеры: отправка при смене этапа воронки (мгновенно)
 - Temporal-триггеры: отправка по расписанию относительно даты термина (cron)
 - Защита от ложных срабатываний: проверка этап + дата (СТОП-этапы "отменён/перенесён")
-- Персонализация: имя клиента, дата термина, день недели, тип учреждения (Jobcenter/Agentur für Arbeit)
+- Персонализация: имя клиента, дата термина, день недели, customer-facing контекст `с Бератором`
 - Дедупликация temporal-сообщений: одно сообщение каждого типа на (lead_id, termin_date)
 - Обновление PIPELINE_CONFIG для обеих воронок (новые status_id)
 - Расширение MessageData и WazzupMessenger для работы с несколькими шаблонами
@@ -93,7 +116,7 @@ server/
 - `'berater_day_minus_7'` — за 7 дней до термина
 - `'berater_day_minus_3'` — за 3 дня до термина
 - `'berater_day_minus_1'` — за 1 день до термина
-- `'berater_day_0'` — в день термина (утром в 9:00)
+- `'berater_day_0'` — в день термина (первый cron в send window)
 
 > `'berater_post_termin'` исключён из scope (решение Дмитрия, 04.03.2026). В CHECK constraint и TEMPLATE_MAP не добавляется.
 
@@ -131,17 +154,20 @@ COMMIT;
 
 `migrate_db()` вызывается из `init_db()` после `CREATE TABLE IF NOT EXISTS`. Идемпотентна.
 
-**Новое поле `template_values` для retry S02-сообщений:**
+**Поле `template_values` для retry S02-сообщений:**
 
 ```sql
-template_values TEXT  -- JSON-массив строк, например ["Анна", "Jobcenter", "Среда", "25.03.2026"]
+template_values TEXT  -- JSON, в актуальном коде keyed-dict с line-specific полями
+                      -- legacy JSON-массивы поддерживаются только для обратной совместимости в retry/pending
                       -- NULL для S01-сообщений ('first', 'second')
-                      -- Заполняется для всех S02-типов при сохранении в БД
 ```
 
-Проблема: `process_retries()` (cron.py:75) восстанавливает `MessageData(line, termin_date)` только из БД. Поля `name`, `institution`, `weekday`, `date` не хранились → при retry TEMPLATE_MAP-lambda получает `None`-значения → Wazzup API отправляет шаблон с пустыми переменными.
+Проблема: старые S02-записи в БД хранили positional/legacy `template_values`, из-за чего retry/pending могли восстанавливать устаревший customer-facing текст или пустые переменные.
 
-Решение: сохранять `json.dumps(template_values_list)` в поле `template_values` при каждой S02-отправке. При retry — десериализовать и передать в MessageData через `**dict(zip(("name","institution","weekday","date"), vals))`.
+Решение: сохранять line-specific keyed JSON в поле `template_values` при каждой новой S02-отправке. При retry/pending/backfill:
+- keyed payload используется как источник данных;
+- legacy list-format восстанавливается через line-specific normalizer;
+- legacy customer-facing поля (`topic/location_text/subject_text/time`) при retry/pending/backfill приводятся к финальному T17-контракту (`news_text`, `institution`, `checklist_text`, `schedule_text`, `datetime_text`) перед повторной отправкой.
 
 Это затрагивает:
 - `db.py`: `template_values TEXT` в migrate_db()
@@ -188,7 +214,7 @@ WHERE line IN (
 ```json
 {
   "status": "ok",
-  "send_window": "9-21",
+  "send_window": "8-22",
   "server_time_utc": "...",
   "server_time_berlin": "...",
   "in_window": true,
@@ -216,12 +242,12 @@ WHERE line IN (
 
 | # | Сообщение | Воронка | line | Триггер | WABA GUID | Переменные | СТОП-этапы |
 |---|-----------|---------|------|---------|-----------|------------|------------|
-| Г1 | После консультации 1й линии | Бух Гос | `gosniki_consultation_done` | Webhook: status 95514983 "Консультация проведена" | `d253993f-e2fc-441f-a877-0c2252cb300b` | {{1}}=имя | — |
-| Б1 | Поздравление (принято от 1й линии) | Бух Бератер | `berater_accepted` | Webhook: status 93860331 "Принято от первой линии" | `18b763f8-1841-43fb-af65-669ab4c8dcea` | {{1}}=имя | — |
-| Б2 | За 7 дней до термина | Бух Бератер | `berater_day_minus_7` | Temporal: termin_date - 7 дней | ❌ ЗАГЛУШКА (>550 символов, не прошёл WABA) | {{1}}=имя, {{2}}=учреждение, ... | `93860875` (ДЦ отменён), `93860883` (АА отменён) |
-| Б3 | За 3 дня до термина | Бух Бератер | `berater_day_minus_3` | Temporal: termin_date - 3 дня | `140a1ed5-7047-4de1-aa0d-d3fe5e0d912a` | {{1}}=имя, {{2}}=учреждение, {{3}}=день недели, {{4}}=дата | `93860875`, `93860883` |
-| Б4 | За 1 день до термина | Бух Бератер | `berater_day_minus_1` | Temporal: termin_date - 1 день | `7732e8ac-1bcc-42d6-a723-bbb80b635c79` | {{1}}=имя | `93860875`, `93860883` |
-| Б5 | В день термина (утро) | Бух Бератер | `berater_day_0` | Temporal: termin_date, первый cron в окне (9:00) | `176a8b5b-8704-4d04-aee5-0fbd08641806` | {{1}}=имя | `93860875`, `93860883` |
+| Г1 | После консультации 1й линии (utility-only) | Бух Гос | `gosniki_consultation_done` | Webhook: status 95514983 "Консультация проведена" | `95ddec60-bb6b-44a8-b5fb-a98abd76f974` | {{1}}=SternMeister, {{2}}=news_text | — |
+| Б1 | Уведомление после записи (utility-only) | Бух Бератер | `berater_accepted` | Webhook: status 93860331 "Принято от первой линии" | `47d2946c-f66a-4697-b702-eb5d138bb1f1` | {{1}}=имя | — |
+| Б2 | За 7 дней до термина | Бух Бератер | `berater_day_minus_7` | Temporal: termin_date - 7 дней | `b028964c-9c27-4bc9-9b97-02a5e283df16` | {{1}}=имя, {{2}}=дата, {{3}}=с Бератором, {{4}}=checklist_text | `93860875` (ДЦ отменён), `93860883` (АА отменён) |
+| Б3 | За 3 дня до термина | Бух Бератер | `berater_day_minus_3` | Temporal: termin_date - 3 дня | `e1cb07aa-5236-4f8a-84dc-fef26b3cccf6` | {{1}}=имя, {{2}}=с Бератором, {{3}}=schedule_text | `93860875`, `93860883` |
+| Б4 | За 1 день до термина (utility-only) | Бух Бератер | `berater_day_minus_1` | Temporal: termin_date - 1 день | `a9b04e05-6b6c-4a5f-9463-d8a0d96316f4` | {{1}}=имя, {{2}}=datetime_text | `93860875`, `93860883` |
+| Б5 | В день термина (утро) | Бух Бератер | `berater_day_0` | Temporal: termin_date, первый cron в окне (`08:00-22:00`) | `176a8b5b-8704-4d04-aee5-0fbd08641806` | {{1}}=имя | `93860875`, `93860883` |
 
 ### 2. PIPELINE_CONFIG (обновлённый)
 
@@ -250,7 +276,7 @@ STOP_STATUSES = {
 
 **Примечание:** pipeline_id "Бух Гос" изменился с 10631243 (старый "Госники") на 10935879. Старый pipeline 10631243 теперь называется "Бух Комм" (коммерческие продажи, не наш scope).
 
-> ⚠️ **Breaking change (S01→S02):** Маппинг `93860331 → "first"` (S01, шаблон "Напоминание о записи или встрече") заменяется на `93860331 → "berater_accepted"` (S02, шаблон Б1: поздравление, GUID `18b763f8-...`). С момента деплоя S02 клиенты «Бух Бератер» при переводе на «Принято от первой линии» получат шаблон Б1 вместо прежнего S01-сообщения. Это намеренная замена — S01-шаблон для Бератера выводится из эксплуатации. Существующие тесты, проверяющие `93860331 → "first"`, должны быть обновлены в T12.
+> ⚠️ **Breaking change (S01→S02/T16/T17):** Маппинг `93860331 → "first"` (S01) заменён на `93860331 → "berater_accepted"` (S02). В T17 линия Б1 финализирована как отдельный onboarding utility-шаблон с одной переменной `{{1}}=имя`.
 
 ### 3. Маппинг line → WABA template
 
@@ -267,24 +293,31 @@ TEMPLATE_MAP = {
     },
     # S02 — новые шаблоны
     "gosniki_consultation_done": {
-        "template_guid": "d253993f-e2fc-441f-a877-0c2252cb300b",
-        "vars": lambda name, **_: [name],
+        "template_guid": "95ddec60-bb6b-44a8-b5fb-a98abd76f974",
+        "vars": lambda news_text, **_: [
+            "SternMeister",
+            news_text,
+        ],
     },
     "berater_accepted": {
-        "template_guid": "18b763f8-1841-43fb-af65-669ab4c8dcea",
+        "template_guid": "47d2946c-f66a-4697-b702-eb5d138bb1f1",
         "vars": lambda name, **_: [name],
     },
     "berater_day_minus_7": {
-        "template_guid": None,  # ЗАГЛУШКА — шаблон не прошёл WABA (>550 символов)
-        "vars": None,
+        "template_guid": "b028964c-9c27-4bc9-9b97-02a5e283df16",
+        "vars": lambda name, date, institution, checklist_text, **_: [
+            name, date, institution, checklist_text
+        ],
     },
     "berater_day_minus_3": {
-        "template_guid": "140a1ed5-7047-4de1-aa0d-d3fe5e0d912a",
-        "vars": lambda name, institution, weekday, date, **_: [name, institution, weekday, date],
+        "template_guid": "e1cb07aa-5236-4f8a-84dc-fef26b3cccf6",
+        "vars": lambda name, institution, schedule_text, **_: [
+            name, institution, schedule_text
+        ],
     },
     "berater_day_minus_1": {
-        "template_guid": "7732e8ac-1bcc-42d6-a723-bbb80b635c79",
-        "vars": lambda name, **_: [name],
+        "template_guid": "a9b04e05-6b6c-4a5f-9463-d8a0d96316f4",
+        "vars": lambda name, datetime_text, **_: [name, datetime_text],
     },
     "berater_day_0": {
         "template_guid": "176a8b5b-8704-4d04-aee5-0fbd08641806",
@@ -302,10 +335,18 @@ TEMPLATE_MAP = {
 class MessageData:
     line: str               # все валидные значения из TEMPLATE_MAP
     termin_date: str        # "" допустимо для Г1/Б1 (шаблон не использует дату)
-    name: str | None = None          # имя клиента; обязательно если vars его использует
-    institution: str | None = None   # "Jobcenter" / "Agentur für Arbeit"
-    weekday: str | None = None       # "Понедельник", "Вторник", ...
-    date: str | None = None          # дата термина в формате "DD.MM.YYYY" (для шаблона)
+    name: str | None = None          # имя клиента
+    news_text: str | None = None     # Г1: customer-facing новость
+    institution: str | None = None   # customer-facing "с Бератором"
+    weekday: str | None = None       # legacy/compat helper field
+    date: str | None = None          # дата термина в формате "DD.MM.YYYY"
+    time: str | None = None          # legacy/compat helper field
+    checklist_text: str | None = None  # Б2: plain-text checklist
+    schedule_text: str | None = None   # Б3: "Среда, 19.03.2026"
+    topic: str | None = None           # legacy B1 compatibility
+    subject_text: str | None = None    # legacy B4 compatibility
+    datetime_text: str | None = None   # Б4: дата или дата+время
+    location_text: str | None = None   # legacy B1 compatibility
 ```
 
 `send_message()` передаёт поля в TEMPLATE_MAP lambda через `**dataclasses.asdict(message_data)` — все `**_` поглотят лишнее.
@@ -320,7 +361,7 @@ class MessageData:
 
 ```
 def process_temporal_triggers():
-    1. Проверить окно отправки (9-21 Berlin). Если вне окна → return.
+    1. Проверить окно отправки (8-22 Berlin). Если вне окна → return.
     2. Получить все активные лиды Бух Бератер (pipeline_id=12154099):
        - Kommo API: GET /leads?filter[pipeline_id]=12154099 с пагинацией (по 250, loop until page empty).
        - Kommo API НЕ поддерживает фильтр "статус НЕ в STOP_STATUSES". Фильтрация по STOP_STATUSES делается в Python после получения.
@@ -399,7 +440,7 @@ Institution определяется однозначно по полю, из к
 - [ ] СТОП-этапы работают: лиды на "отменён/перенесён" НЕ получают temporal-сообщения
 - [ ] Дедупликация: одно сообщение каждого типа на (lead_id, termin_date)
 - [ ] Персонализация: имя, дата, день недели, тип учреждения подставляются корректно
-- [ ] Окно отправки 9-21 соблюдается для всех типов
+- [ ] Окно отправки 8-22 соблюдается для всех типов
 - [ ] Примечания в Kommo создаются
 - [ ] Telegram-алерты при ошибках
 
@@ -522,8 +563,8 @@ Institution определяется однозначно по полю, из к
 1. **Нагрузка на Kommo API**: cron каждый час запрашивает активные лиды → rate limiting
    - Митигация: фильтровать лиды по pipeline в запросе; исключать закрытые этапы через `filter[statuses][0]` на уровне API, чтобы не пагинировать по мёртвым записям
 
-2. **Шаблон "За 7 дней" не одобрен**: код работает с заглушкой, сообщение не отправляется до получения GUID
-   - Митигация: логируем каждый пропуск, чтобы видеть масштаб
+2. **Финальный render новых utility-шаблонов нужно spot-check’ить вручную**: approval в Wazzup не гарантирует, что preview и реальный WhatsApp-рендер полностью совпадут с ожиданиями
+   - Митигация: whitelist render-check перед акцептом T17, если нужен отдельный финальный smoke
 
 3. **Дублирование при изменении даты термина**: менеджер сменил дату → клиент получит 2 сообщения "за 3 дня" (для старой и новой даты)
    - Митигация: уникальный индекс на (lead_id, line, termin_date) предотвратит точный дубликат
@@ -554,11 +595,52 @@ Institution определяется однозначно по полю, из к
 - [x] **T12** — config + schema + webhook/messenger (Г1, Б1): [T12_s02_config_schema_webhook_done.md](../3.%20tasks/Done/S02_notifications_expansion_done/T12_s02_config_schema_webhook_done.md) ✅
 - [x] **T13** — temporal-триггеры (Б3–Б5): [T13_s02_temporal_triggers_done.md](../3.%20tasks/Done/S02_notifications_expansion_done/T13_s02_temporal_triggers_done.md) ✅ 261 тест
 - [x] **T14** — деплой S02: [T14_s02_deploy_done.md](../3.%20tasks/Done/S02_notifications_expansion_done/T14_s02_deploy_done.md) ✅
-- [ ] **T15** — fail-safe backfill для пропущенных webhook-триггеров (Г1/Б1): [T15_s02_webhook_backfill_failsafe.md](../3.%20tasks/S02_notifications_expansion/T15_s02_webhook_backfill_failsafe.md)
+- [x] **T15** — fail-safe backfill для пропущенных webhook-триггеров (Г1/Б1): [T15_s02_webhook_backfill_failsafe_done.md](../3.%20tasks/Done/S02_notifications_expansion_done/T15_s02_webhook_backfill_failsafe_done.md) ✅ 272 теста
+- [x] **T16** — utility-only серия S02 (Г1/Б1/Б2/Б4): [T16_s02_utility_only_template_series_done.md](../3.%20tasks/Done/S02_notifications_expansion_done/T16_s02_utility_only_template_series_done.md) ✅
+- [x] **T17** — customer-facing text/template cleanup + send window `08:00-22:00`: [T17_s02_customer_facing_text_cleanup_done.md](../3.%20tasks/Done/S02_notifications_expansion_done/T17_s02_customer_facing_text_cleanup_done.md) ✅
 
 ---
 
 ## История изменений
+
+### v3.6 (2026-03-14) — T17 акцептована, S02 завершена
+- T17: customer-facing text/template cleanup + send window `08:00-22:00` — выполнена. 313 тестов (0 failed). Два ревью-цикла: найден и исправлен HIGH (dict-path retry Б2/Б3 не форсировал `CUSTOMER_FACING_BERATER`), добавлен `_non_empty` для Б5. Все 11 критериев приёмки закрыты.
+- Файл задачи T17 → Done/. Папка `S02_notifications_expansion/` удалена (пуста).
+- **Все 6 задач S02 (T12-T17) выполнены. Спецификация S02 закрыта.**
+
+### v3.5 (2026-03-13) — T17 final sync: approved Wazzup серия + repo/docs sync
+- Через Wazzup API подтверждены финальные approved GUID для Г1/Б1/Б2/Б3/Б4; они синхронизированы в `config.py`, retry/backfill normalizers, тестах и документации.
+- Финальные переменные зафиксированы как: Г1 `2`, Б1 `1`, Б2 `4`, Б3 `3`, Б4 `2`, Б5 `1`.
+- Для Б3 подтверждён quick reply `Нужна помощь`; для Б4 — quick replies `Да, буду` / `Нет, не смогу`.
+- Targeted Docker suite для S02 sync: `198 passed`.
+- До полного акцепта T17 вне репозитория остаётся только optional whitelist render-check.
+
+### v3.4 (2026-03-13) — T17 repo-side реализована
+- `template_helpers.py`: зафиксирован customer-facing контракт T17 (`с Бератором`, `запросу`, без `назначенное время`), добавлены helper’ы для AA `-7` gate и stale-state detection Б1.
+- `app.py`: webhook Б1 больше не уходит, если у сделки уже активен более поздний temporal-state; вместо этого сохраняется терминальный no-retry marker в БД.
+- `cron.py`: retry/pending/backfill нормализуют legacy/keyed `template_values` в новые customer-facing строки; stale Б1 не досылается; Г1 backfill переведён на keyed payload; Б2 по АА ограничен этапами `102183943/102183947`.
+- Тесты: repo-side sync покрыт таргетированным Docker-прогоном S02-набора.
+
+### v3.3 (2026-03-13) — T16 акцептована, создана T17
+- Статус спеки обновлён `done` → `active`: после акцепта T16 открыт новый инкремент T17 на customer-facing тексты и шаблоны.
+- T16 перемещена в `Done/` и отмечена завершённой.
+- Добавлена T17: правки customer-facing copy для Б1/Б2/Б3/Б4, Wazzup template cleanup, безопасный формат списков без квадратов/битых bullet-символов и изменение send window на `08:00-22:00 Europe/Berlin`.
+
+### v3.2 (2026-03-10/2026-03-11) — реализация T16 + hotfix в кодовой базе (исторический этап до final T17 sync)
+- `config.py`: Г1/Б1/Б2/Б4 переведены на utility-only шаблоны как промежуточный этап перед финальной T17-синхронизацией.
+- `kommo.py`: добавлен `extract_time_termin()` (`field_id=886670` → `HH:MM`, Europe/Berlin).
+- `app.py`: для Б1 внедрён winner-алгоритм DC/AA, line-specific composite поля и keyed `template_values`.
+- `cron.py`: Б2 включён как реальная отправка; Б4 использует line-specific composite поля; backfill Б1 переведён на keyed `template_values`; retry поддерживает legacy Б1 list-format через fallback-реконструкцию; `process_pending()` больше не блокируется текущим send window.
+- Тесты: обновлены unit/integration проверки для utility-only серии и legacy retry совместимости.
+
+### v3.1 (2026-03-10) — создана T16 (utility-only серия)
+- Зафиксирован production-кейс частичной недоставки MARKETING-шаблонов (Б1/Б4) при успешной API-отправке.
+- Подтверждён approved status utility-шаблона Б2 в Wazzup, но код на тот момент ещё оставался в режиме placeholder.
+- Спека S02 переоткрыта под T16: подключение Б2 и переход цепочки Б1/Б2/Б4 на utility-only шаблоны для полной серии сообщений.
+
+### v3.0 (2026-03-06) — T15 акцептована, S02 stabilization завершена
+- T15: fail-safe backfill webhook-линий (Г1/Б1) — выполнена. 272 теста (0 failed, 1 skipped). Три ревью-цикла: 2 HIGH (IntegrityError в webhook handler, send-before-record в backfill) — все исправлены. record-before-send паттерн, lifetime dedup, partial unique index `idx_dedup_webhook_lines`. Файл задачи → Done/.
+- Все 4 задачи спеки (T12-T15) завершены. S02 stabilization закрыта.
 
 ### v2.9 (2026-03-06) — добавлена T15 (stabilization)
 - После production-проверки выявлен сценарий потери webhook-события для автосозданной дочерней сделки (Бератер), из-за чего сообщение Б1 не создаётся в `messages` и не отправляется.

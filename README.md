@@ -138,7 +138,7 @@ curl http://localhost:8000/health
 ```json
 {
   "status": "ok",
-  "send_window": "9-21"
+  "send_window": "8-22"
 }
 ```
 

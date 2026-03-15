@@ -25,6 +25,11 @@
 - 2026-03-04 — T12: S02 config+schema+webhook+messenger — PIPELINE_CONFIG (Бух Гос/Бератер), TEMPLATE_MAP (6 линий + заглушка Б2), migrate_db() с template_values, extract_name(), MessageData расширен, failed_temporal в /health, восстановление template_values в cron. 205 тестов (0 failed)
 - 2026-03-04 — T13: S02 temporal-триггеры (Б3–Б5) — process_temporal_triggers() с СТОП-проверкой, дедупликацией, пагинацией, Berlin today; get_active_leads(), extract_termin_date_dc/aa(), weekday_name(), format_date_ru(), get_temporal_dedup(); _TEMPORAL_LINES (next_retry_at=None для sent temporal), IntegrityError race protection. 261 тест (0 failed)
 - 2026-03-06 — T14: S02 деплой на Hetzner — Docker rebuild + redeploy (образ :s02), DB миграция (migrate_db() с template_values, новые line-значения, idx_dedup_temporal), backup БД, smoke-тесты в продакшене. Все 7 критериев приёмки пройдены. **S02 WhatsApp Notifications Expansion — done**
+- 2026-03-06 — T15: S02 fail-safe backfill webhook-линий (Г1/Б1) — process_webhook_backfill() в cron, record-before-send паттерн, partial unique index idx_dedup_webhook_lines, lifetime dedup в webhook handler, IntegrityError protection. 272 теста. **S02 stabilization — done**
+- 2026-03-10 — T16: S02 utility-only серия (Б1/Б2/Б4) — Б1/Б2/Б4 переведены на UTILITY GUID, Б2 включён в реальные temporal-отправки, добавлен `extract_time_termin()` (Kommo field 886670), введены keyed `template_values` для Б1 и fallback-safe сборка composite-полей для webhook/temporal/backfill/retry.
+- 2026-03-13 — T17: создана задача S02 на customer-facing cleanup текстов/Wazzup-шаблонов и изменение окна отправки на `08:00-22:00 Europe/Berlin`.
+- 2026-03-13 — T17 repo-side: customer-facing контракт унифицирован до `с Бератором` / `запросу`, stale Б1 перестал досылаться через webhook/retry/pending/backfill, для Б2 по АА добавлен stage-gate `102183943/102183947`, send window синхронизирован на `08:00-22:00`, full Docker-прогон `pytest tests -q` → `312 passed`.
+- 2026-03-14 — T17 акцептована: customer-facing text/template cleanup + send window `08:00-22:00`. Исправлен dict-path retry Б2/Б3 (форсирование `CUSTOMER_FACING_BERATER`), добавлен `_non_empty` для Б5, тесты keyed dict retry. 313 тестов. **S02 Расширение системы уведомлений — done.**
 
 ### Fixed
 - 2026-02-24 — Код-ревью T09: Markdown injection в catch-all алерте (send_alert → alert_unexpected_error с _escape_md), добавлен _escape_md в alert_info, интеграционные тесты для cron retry/pending alert_messenger_error
@@ -33,6 +38,8 @@
 - 2026-02-24 — Код-ревью T04: 429 retry из JSON body (не header), extract_termin_date возвращает None при ошибке парсинга, JSONDecodeError → KommoAPIError, локальные номера 0→+49, удалён мёртвый код (_TRUNK_ZERO_RE, unused import)
 - 2026-02-24 — Код-ревью T05: добавлен build_message_text() для DB logging, elif chain в error handling, WAZZUP_TEMPLATE_GUID→WAZZUP_TEMPLATE_ID, удалён python-dateutil, убран base.py/Flask из docs
 - 2026-02-24 — Код-ревью T06: attempts=0 для pending, консистентный response format (всегда results array), TypeError в form-парсере, json.loads вместо request.json(), тесты termin fallback/batch mixed/malformed body (61 тест)
+- 2026-03-10 — FIX 016 (T16 раунд 2): добавлен retry-тест Б1 keyed-dict `template_values`, убрана двойная нормализация `time_raw` в webhook/backfill/temporal, расширены temporal-тесты для Б2 (`time` fallback) и Б4 (composite-поля), e2e-тест Б1 переведён на явный mocking `extract_termin_date_dc/aa/time_termin`.
+- 2026-03-13 — T16: задача акцептована, файл перемещён в `Done/`, `HANDOFF` и S02-спека синхронизированы.
 
 ---
 

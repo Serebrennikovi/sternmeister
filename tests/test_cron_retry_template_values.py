@@ -9,6 +9,7 @@ from freezegun import freeze_time
 
 from server.db import create_message, init_db, get_message_by_id, _get_conn
 from server.messenger import MessengerError, MessageData
+from server.template_helpers import B2_CHECKLIST_TEXT, CUSTOMER_FACING_BERATER
 
 
 @pytest.fixture(autouse=True)
@@ -68,8 +69,40 @@ def _create_pending(line: str, termin_date: str,
 class TestProcessRetriesTemplateValues:
 
     @freeze_time("2026-03-01 10:00:00")
-    def test_restores_4_vars_for_berater_day_minus_3(self):
-        """Retry msg with 4 template vars → send_message receives correct MessageData."""
+    def test_keyed_retry_for_berater_day_minus_7_forces_customer_facing_institution(self):
+        """Keyed retry for Б2 ignores legacy institution values from pre-T17 rows."""
+        tv = json.dumps({
+            "name": "Анна",
+            "institution": "Jobcenter",
+            "date": "25.03.2026",
+            "checklist_text": B2_CHECKLIST_TEXT,
+        })
+        _create_msg("berater_day_minus_7", "25.03.2026", template_values=tv)
+
+        captured = {}
+
+        def fake_send(phone, message_data):
+            captured["message_data"] = message_data
+            return {"message_id": "retry-msg-000"}
+
+        from server.cron import process_retries
+        with patch("server.cron.get_messenger") as mock_gm, \
+             patch("server.cron.is_in_send_window", return_value=True):
+            messenger = MagicMock()
+            messenger.send_message.side_effect = fake_send
+            mock_gm.return_value = messenger
+
+            process_retries()
+
+        md = captured["message_data"]
+        assert md.name == "Анна"
+        assert md.institution == CUSTOMER_FACING_BERATER
+        assert md.date == "25.03.2026"
+        assert md.checklist_text == B2_CHECKLIST_TEXT
+
+    @freeze_time("2026-03-01 10:00:00")
+    def test_restores_3_vars_for_berater_day_minus_3(self):
+        """Retry normalizes old temporal institution names to customer-facing text."""
         tv = json.dumps(["Анна", "Jobcenter", "Среда", "25.03.2026"])
         _create_msg("berater_day_minus_3", "25.03.2026", template_values=tv)
 
@@ -90,13 +123,47 @@ class TestProcessRetriesTemplateValues:
 
         md = captured["message_data"]
         assert md.name == "Анна"
-        assert md.institution == "Jobcenter"
+        assert md.institution == CUSTOMER_FACING_BERATER
         assert md.weekday == "Среда"
         assert md.date == "25.03.2026"
+        assert md.schedule_text == "Среда, 25.03.2026"
+
+    @freeze_time("2026-03-01 10:00:00")
+    def test_keyed_retry_for_berater_day_minus_3_forces_customer_facing_institution(self):
+        """Keyed retry for Б3 ignores legacy institution values from pre-T17 rows."""
+        tv = json.dumps({
+            "name": "Анна",
+            "institution": "Jobcenter",
+            "weekday": "Среда",
+            "date": "25.03.2026",
+        })
+        _create_msg("berater_day_minus_3", "25.03.2026", template_values=tv)
+
+        captured = {}
+
+        def fake_send(phone, message_data):
+            captured["message_data"] = message_data
+            return {"message_id": "retry-msg-001-keyed"}
+
+        from server.cron import process_retries
+        with patch("server.cron.get_messenger") as mock_gm, \
+             patch("server.cron.is_in_send_window", return_value=True):
+            messenger = MagicMock()
+            messenger.send_message.side_effect = fake_send
+            mock_gm.return_value = messenger
+
+            process_retries()
+
+        md = captured["message_data"]
+        assert md.name == "Анна"
+        assert md.institution == CUSTOMER_FACING_BERATER
+        assert md.weekday == "Среда"
+        assert md.date == "25.03.2026"
+        assert md.schedule_text == "Среда, 25.03.2026"
 
     @freeze_time("2026-03-01 10:00:00")
     def test_restores_1_var_for_berater_accepted(self):
-        """Retry berater_accepted msg with 1 template var → MessageData.name set."""
+        """Legacy retry for berater_accepted restores name-only payload."""
         tv = json.dumps(["Анна"])
         _create_msg("berater_accepted", "", template_values=tv)
 
@@ -118,19 +185,30 @@ class TestProcessRetriesTemplateValues:
         md = captured["message_data"]
         assert md.name == "Анна"
         assert md.institution is None
-        assert md.weekday is None
-        assert md.date is None
+        assert md.time is None
+        assert md.topic is None
+        assert md.datetime_text is None
+        assert md.location_text is None
 
     @freeze_time("2026-03-01 10:00:00")
-    def test_s01_message_without_template_values_backward_compat(self):
-        """S01 retry (template_values=None) → MessageData without extra fields (backward compat)."""
-        _create_msg("first", "25.02.2026", template_values=None)
+    def test_restores_keyed_vars_for_berater_accepted(self):
+        """Keyed retry for berater_accepted normalizes to name-only payload."""
+        tv = json.dumps({
+            "name": "Мария",
+            "institution": "Jobcenter",
+            "date": "01.04.2026",
+            "time": "10:30",
+            "topic": "термин в Jobcenter",
+            "datetime_text": "01.04.2026 в 10:30",
+            "location_text": "в Jobcenter",
+        })
+        _create_msg("berater_accepted", "01.04.2026", template_values=tv)
 
         captured = {}
 
         def fake_send(phone, message_data):
             captured["message_data"] = message_data
-            return {"message_id": "retry-msg-003"}
+            return {"message_id": "retry-msg-002-keyed"}
 
         from server.cron import process_retries
         with patch("server.cron.get_messenger") as mock_gm, \
@@ -142,10 +220,15 @@ class TestProcessRetriesTemplateValues:
             process_retries()
 
         md = captured["message_data"]
-        assert md.line == "first"
-        assert md.termin_date == "25.02.2026"
-        assert md.name is None
+        assert md.termin_date == "01.04.2026"
+        assert md.name == "Мария"
         assert md.institution is None
+        assert md.date is None
+        assert md.time is None
+        assert md.topic is None
+        assert md.datetime_text is None
+        assert md.location_text is None
+
 
 
 # -----------------------------------------------------------------------
@@ -179,6 +262,7 @@ class TestProcessPendingTemplateValues:
         assert md.name == "Мария"
         assert md.line == "gosniki_consultation_done"
         assert md.termin_date == ""
+        assert "Мария" in md.news_text
 
 
 # -----------------------------------------------------------------------

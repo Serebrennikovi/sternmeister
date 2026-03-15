@@ -3,9 +3,8 @@ import json
 import logging
 import sqlite3
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse
@@ -22,6 +21,14 @@ from server.db import (
 )
 from server.kommo import KommoAPIError, get_kommo_client
 from server.messenger import MessageData, MessengerError, get_messenger
+from server.template_helpers import (
+    BERLIN_TZ,
+    build_berater_accepted_texts,
+    build_gosniki_consultation_done_texts,
+    coerce_date,
+    has_newer_berater_temporal_state,
+    pick_berater_accepted_institution_and_date,
+)
 from server.utils import (
     get_next_send_window_start, is_in_send_window, parse_bracket_form,
 )
@@ -49,14 +56,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="WhatsApp Auto-notifications", lifespan=lifespan)
 
 
-_BERLIN_TZ = ZoneInfo("Europe/Berlin")
-
-
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     now_utc = datetime.now(tz=timezone.utc)
-    now_berlin = now_utc.astimezone(_BERLIN_TZ)
+    now_berlin = now_utc.astimezone(BERLIN_TZ)
     failed_temporal = get_failed_temporal_count()
     return JSONResponse({
         "status": "ok",
@@ -174,7 +178,7 @@ def _process_lead_status_inner(lead_status: dict) -> dict:
 
     # 2b. Deduplication.
     # Webhook lines (Г1/Б1): lifetime dedup — one message per (lead_id, line)
-    # for the entire deal lifecycle.  Matches partial unique index
+    # for the entire deal lifecycle. Matches partial unique index
     # idx_dedup_webhook_lines and the backfill logic in cron.py.
     # Other lines: time-based dedup (DEDUP_WINDOW_MINUTES).
     if line in _TERMIN_OPTIONAL_LINES:
@@ -188,7 +192,7 @@ def _process_lead_status_inner(lead_status: dict) -> dict:
                 "message": "Duplicate webhook, already processed",
             }
     else:
-        existing = get_recent_message(lead_id, line, within_minutes=DEDUP_WINDOW_MINUTES)
+        existing = get_recent_message(lead_id, line, DEDUP_WINDOW_MINUTES)
         if existing:
             logger.info(
                 "Duplicate webhook for lead=%d line=%s (msg %d at %s), skipping",
@@ -229,28 +233,12 @@ def _process_lead_status_inner(lead_status: dict) -> dict:
         logger.info("Phone %s not in whitelist, skipping lead %d", phone, lead_id)
         return {"status": "ok", "message": "Phone not in whitelist (test mode)"}
 
-    # 5. Extract termin date (try all date fields).
-    # For lines in _TERMIN_OPTIONAL_LINES: date is optional (template doesn't use it),
-    # continue with "" if not found.
-    # For other lines: date is required; skip with error if not found.
-    termin_date = None
-    for fid in _TERMIN_FIELD_IDS:
-        termin_date = kommo.extract_termin_date(lead, fid)
-        if termin_date:
-            break
-    if not termin_date:
-        if line in _TERMIN_OPTIONAL_LINES:
-            termin_date = ""  # Template doesn't use date; proceed
-        else:
-            logger.warning("No termin date for lead %d, cannot send notification", lead_id)
-            get_alerter().send_alert(
-                f"Дата термина не найдена для lead {lead_id}", level="WARNING",
-            )
-            return {"status": "error", "message": "Termin date not found in lead"}
-
-    # 5b. For Г1/Б1: extract client name ({{1}} in template — required).
+    # 5. Prepare template variables (line-specific).
+    termin_date = ""
     name = None
     template_values_json = None
+    message_extra: dict[str, Any] = {}
+
     if line in _TERMIN_OPTIONAL_LINES:
         name = kommo.extract_name(contact)
         if name is None:
@@ -263,14 +251,97 @@ def _process_lead_status_inner(lead_status: dict) -> dict:
                 level="WARNING",
             )
             return {"status": "error", "message": "Name not found in contact"}
-        template_values_json = json.dumps([name])
+
+        if line == "berater_accepted":
+            date_dc = coerce_date(kommo.extract_termin_date_dc(lead))
+            date_aa = coerce_date(kommo.extract_termin_date_aa(lead))
+            _, date_for_template = pick_berater_accepted_institution_and_date(
+                date_dc,
+                date_aa,
+            )
+            b1_texts = build_berater_accepted_texts(
+                name,
+            )
+            name = b1_texts["name"]
+            termin_date = date_for_template or ""
+            template_values_json = json.dumps({
+                "name": name,
+            })
+            if has_newer_berater_temporal_state(
+                date_dc,
+                date_aa,
+                lead.get("status_id"),
+            ):
+                logger.info(
+                    "Skipping stale berater_accepted for lead=%d: later temporal state already active",
+                    lead_id,
+                )
+                message_data = MessageData(
+                    line=line,
+                    termin_date=termin_date,
+                    name=name,
+                    **message_extra,
+                )
+                message_text = get_messenger().build_message_text(message_data)
+                try:
+                    msg_id = create_message(
+                        kommo_lead_id=lead_id,
+                        kommo_contact_id=contact_id,
+                        phone=phone,
+                        line=line,
+                        termin_date=termin_date,
+                        message_text=f"[stale berater_accepted] {message_text}",
+                        status="failed",
+                        attempts=0,
+                        next_retry_at=None,
+                        template_values=template_values_json,
+                    )
+                except sqlite3.IntegrityError:
+                    msg_id = None
+                return {
+                    "status": "ok",
+                    "message": "Stale berater_accepted skipped: later temporal state active",
+                    "message_id": msg_id,
+                }
+        else:
+            # Г1: дата опциональна, шаблон использует только бренд + текст новости.
+            for fid in _TERMIN_FIELD_IDS:
+                termin_date = kommo.extract_termin_date(lead, fid)
+                if termin_date:
+                    break
+            if not termin_date:
+                termin_date = ""
+            g1_texts = build_gosniki_consultation_done_texts(name)
+            message_extra = {
+                "news_text": g1_texts["news_text"],
+            }
+            template_values_json = json.dumps({
+                "name": name,
+                "news_text": g1_texts["news_text"],
+            })
+    else:
+        for fid in _TERMIN_FIELD_IDS:
+            termin_date = kommo.extract_termin_date(lead, fid)
+            if termin_date:
+                break
+        if not termin_date:
+            logger.warning("No termin date for lead %d, cannot send notification", lead_id)
+            get_alerter().send_alert(
+                f"Дата термина не найдена для lead {lead_id}", level="WARNING",
+            )
+            return {"status": "error", "message": "Termin date not found in lead"}
 
     # 6. Build message
-    message_data = MessageData(line=line, termin_date=termin_date, name=name)
+    message_data = MessageData(
+        line=line,
+        termin_date=termin_date,
+        name=name,
+        **message_extra,
+    )
     messenger = get_messenger()
     message_text = messenger.build_message_text(message_data)
 
-    # 7. Check send window — outside 9-21 Berlin -> save as pending
+    # 7. Check send window — outside 8-22 Berlin -> save as pending
     if not is_in_send_window():
         next_retry_at = get_next_send_window_start()
         try:

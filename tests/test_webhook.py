@@ -21,6 +21,16 @@ def client():
     return TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _mock_db_reads():
+    """Avoid real DB dependency in unit tests for webhook handler."""
+    with (
+        patch("server.app.get_webhook_line_exists", return_value=False),
+        patch("server.app.get_failed_temporal_count", return_value=0),
+    ):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -97,6 +107,9 @@ def _patch_full_happy_path(
     kommo.extract_phone.return_value = phone
     kommo.extract_name.return_value = name
     kommo.extract_termin_date.return_value = termin_date
+    kommo.extract_termin_date_dc.return_value = None
+    kommo.extract_termin_date_aa.return_value = None
+    kommo.extract_time_termin.return_value = None
     mock_get_kommo.return_value = kommo
 
     messenger = MagicMock()
@@ -129,6 +142,9 @@ def _patch_happy_path_with_termin_fallback(
     kommo.extract_phone.return_value = phone
     kommo.extract_name.return_value = name
     kommo.extract_termin_date.side_effect = lambda lead_data, fid: termin_field_returns.get(fid)
+    kommo.extract_termin_date_dc.return_value = None
+    kommo.extract_termin_date_aa.return_value = None
+    kommo.extract_time_termin.return_value = None
     mock_get_kommo.return_value = kommo
 
     messenger = MagicMock()
@@ -265,7 +281,7 @@ class TestWebhookHappyPath:
         self, mock_window, mock_recent, mock_create,
         mock_get_messenger, mock_get_kommo, client,
     ):
-        """S02: berater_accepted — sends message, saves template_values=[name]."""
+        """S02: berater_accepted — sends message, saves keyed template_values."""
         kommo, messenger = _patch_full_happy_path(
             mock_get_kommo, mock_get_messenger,
         )
@@ -288,8 +304,8 @@ class TestWebhookHappyPath:
         assert call_kwargs["message_text"] == "test message text"
         assert call_kwargs["sent_at"] is not None
         assert call_kwargs["next_retry_at"] is not None
-        # S02: template_values includes the client name
-        assert call_kwargs["template_values"] == json.dumps(["Test User"])
+        values = json.loads(call_kwargs["template_values"])
+        assert values == {"name": "Test User"}
 
         # Verify note added to Kommo with correct format
         kommo.add_note.assert_called_once()
@@ -537,9 +553,8 @@ class TestWebhookErrors:
 class TestWebhookTerminFallback:
     """Verify termin date extraction tries all 3 field IDs in order.
 
-    S02: berater_accepted (default payload) allows empty termin_date,
-    but requires a name. The fallback tests verify field priority;
-    when a date is found it's stored, when not found "" is stored.
+    For gosniki_consultation_done, date is optional but extraction still
+    tries all 3 field IDs in priority order before falling back to "".
     """
 
     @patch("server.app.get_kommo_client")
@@ -556,7 +571,10 @@ class TestWebhookTerminFallback:
             mock_get_kommo, mock_get_messenger,
             termin_field_returns={885996: "25.02.2026", 887026: None, 887028: None},
         )
-        resp = client.post("/webhook/kommo", json=_kommo_json_payload())
+        resp = client.post(
+            "/webhook/kommo",
+            json=_kommo_json_payload(status_id=95514983, pipeline_id=10935879),
+        )
         result = _single_result(resp)
         assert result.get("message_id") == 99
         assert mock_create.call_args.kwargs["termin_date"] == "25.02.2026"
@@ -575,7 +593,10 @@ class TestWebhookTerminFallback:
             mock_get_kommo, mock_get_messenger,
             termin_field_returns={885996: None, 887026: "01.03.2026", 887028: None},
         )
-        resp = client.post("/webhook/kommo", json=_kommo_json_payload())
+        resp = client.post(
+            "/webhook/kommo",
+            json=_kommo_json_payload(status_id=95514983, pipeline_id=10935879),
+        )
         result = _single_result(resp)
         assert result.get("message_id") == 99
         assert mock_create.call_args.kwargs["termin_date"] == "01.03.2026"
@@ -594,7 +615,10 @@ class TestWebhookTerminFallback:
             mock_get_kommo, mock_get_messenger,
             termin_field_returns={885996: None, 887026: None, 887028: "10.03.2026"},
         )
-        resp = client.post("/webhook/kommo", json=_kommo_json_payload())
+        resp = client.post(
+            "/webhook/kommo",
+            json=_kommo_json_payload(status_id=95514983, pipeline_id=10935879),
+        )
         result = _single_result(resp)
         assert result.get("message_id") == 99
         assert mock_create.call_args.kwargs["termin_date"] == "10.03.2026"

@@ -1,5 +1,5 @@
 **Дата:** 2026-03-06
-**Статус:** draft
+**Статус:** done
 **Спецификация:** docs/2. specifications/S02_notifications_expansion_done.md
 
 # T15 — Fail-safe backfill для пропущенных webhook-триггеров (Г1/Б1)

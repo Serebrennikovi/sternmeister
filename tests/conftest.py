@@ -12,7 +12,6 @@ os.environ.setdefault("KOMMO_DOMAIN", "test.kommo.com")
 os.environ.setdefault("KOMMO_TOKEN", "test-token")
 os.environ.setdefault("WAZZUP_API_KEY", "test-api-key")
 os.environ.setdefault("WAZZUP_CHANNEL_ID", "test-channel-id")
-os.environ.setdefault("WAZZUP_TEMPLATE_ID", "test-template-id")
 os.environ["DATABASE_PATH"] = _test_db_path
 
 

@@ -250,6 +250,35 @@ class KommoClient:
         )
         return None
 
+    @staticmethod
+    def extract_time_termin(lead_data: dict, field_id: int) -> str | None:
+        """Extract a termin time from lead custom fields by field_id.
+
+        Kommo stores date/time values as Unix timestamps.
+        Returns time in Europe/Berlin timezone as ``HH:MM``.
+        """
+        for field in lead_data.get("custom_fields_values") or []:
+            if field.get("field_id") == field_id:
+                values = field.get("values") or []
+                if values:
+                    raw = values[0].get("value")
+                    if raw is not None:
+                        try:
+                            ts = int(raw)
+                            dt = datetime.fromtimestamp(ts, tz=_BERLIN_TZ)
+                            return dt.strftime("%H:%M")
+                        except (ValueError, TypeError, OSError):
+                            logger.warning(
+                                "Cannot parse termin time value %r (field %d)",
+                                raw, field_id,
+                            )
+                            return None
+        logger.debug(
+            "Termin time field %d not found in lead %s",
+            field_id, lead_data.get("id"),
+        )
+        return None
+
     def get_active_leads(self, pipeline_id: int) -> list[dict]:
         """Fetch all active leads for a pipeline with embedded contacts.
 

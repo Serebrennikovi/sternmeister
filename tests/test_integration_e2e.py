@@ -26,7 +26,6 @@ os.environ.setdefault("KOMMO_DOMAIN", "test.kommo.com")
 os.environ.setdefault("KOMMO_TOKEN", "test-token")
 os.environ.setdefault("WAZZUP_API_KEY", "test-wazzup-key")
 os.environ.setdefault("WAZZUP_CHANNEL_ID", "test-channel")
-os.environ.setdefault("WAZZUP_TEMPLATE_ID", "test-template")
 os.environ.setdefault("KOMMO_WEBHOOK_SECRET", "")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "")
 os.environ.setdefault("TELEGRAM_ALERT_CHAT_ID", "")
@@ -153,6 +152,9 @@ class TestScenario1BeraterAccepted:
             kommo.extract_phone.return_value = "+996501354144"
             kommo.extract_name.return_value = "Анна Петрова"
             kommo.extract_termin_date.return_value = None  # optional for berater_accepted
+            kommo.extract_termin_date_dc.return_value = None
+            kommo.extract_termin_date_aa.return_value = None
+            kommo.extract_time_termin.return_value = None
             mock_kommo_cls.return_value = kommo
 
             messenger = MagicMock()
@@ -186,7 +188,8 @@ class TestScenario1BeraterAccepted:
         assert msg["sent_at"] is not None
         assert msg["next_retry_at"] is not None
         assert msg["messenger_id"] == "wazzup-msg-001"
-        assert msg["template_values"] == json.dumps(["Анна Петрова"])
+        tv = json.loads(msg["template_values"])
+        assert tv == {"name": "Анна Петрова"}
 
         # Verify Kommo note was called
         kommo.add_note.assert_called_once()
@@ -237,7 +240,9 @@ class TestScenario2GosnikisConsultation:
         assert msg["status"] == "sent"
         assert msg["line"] == "gosniki_consultation_done"
         assert msg["phone"] == "+79167310500"
-        assert msg["template_values"] == json.dumps(["Мария Сидорова"])
+        tv = json.loads(msg["template_values"])
+        assert tv["name"] == "Мария Сидорова"
+        assert "Мария Сидорова" in tv["news_text"]
 
 
 class TestScenario3PendingOutsideWindow:
@@ -277,7 +282,8 @@ class TestScenario3PendingOutsideWindow:
         assert msg["attempts"] == 0
         assert msg["sent_at"] is None
         assert msg["next_retry_at"] is not None
-        assert msg["template_values"] == json.dumps(["Иван Иванов"])
+        tv = json.loads(msg["template_values"])
+        assert tv == {"name": "Иван Иванов"}
 
         # Verify messenger.send_message was NOT called
         messenger.send_message.assert_not_called()
@@ -298,7 +304,7 @@ class TestScenario4CronRetry:
             kommo_lead_id=42,
             kommo_contact_id=200,
             phone="+996501354144",
-            line="first",
+            line="gosniki_consultation_done",
             termin_date="26.02.2026",
             message_text="Здравствуйте...",
             status="sent",
@@ -348,7 +354,7 @@ class TestScenario4CronRetry:
             kommo_lead_id=42,
             kommo_contact_id=200,
             phone="+996501354144",
-            line="first",
+            line="gosniki_consultation_done",
             termin_date="26.02.2026",
             message_text="Здравствуйте...",
             status="sent",
@@ -463,7 +469,7 @@ class TestScenario8DoD:
 
     @freeze_time("2026-02-25 10:00:00", tz_offset=0)
     def test_send_window_enforcement(self):
-        """DoD: Отправка только в окне 9:00-21:00."""
+        """DoD: Отправка только в окне 8:00-22:00."""
         from server.utils import is_in_send_window
         # 10:00 UTC = 11:00 CET → inside window
         assert is_in_send_window() is True
@@ -477,11 +483,11 @@ class TestScenario8DoD:
 
     @freeze_time("2026-02-25 22:00:00", tz_offset=0)
     def test_next_window_calculation(self):
-        """DoD: next_retry_at = tomorrow 9:00 Berlin."""
+        """DoD: next_retry_at = tomorrow 8:00 Berlin."""
         from server.utils import get_next_send_window_start
         next_start = get_next_send_window_start()
-        # 9:00 Berlin CET = 08:00 UTC
-        assert "2026-02-26T08:00:00" in next_start
+        # 8:00 Berlin CET = 07:00 UTC
+        assert "2026-02-26T07:00:00" in next_start
 
     def test_dedup_window(self, client, _temp_db):
         """DoD: Deduplication within 10 minutes."""
@@ -511,25 +517,18 @@ class TestScenario8DoD:
         from server.messenger.wazzup import WazzupMessenger, MessageData
         with patch("server.config.WAZZUP_API_KEY", "test"), \
              patch("server.config.WAZZUP_CHANNEL_ID", "ch"), \
-             patch("server.config.WAZZUP_TEMPLATE_ID", "tpl"), \
              patch("server.config.WAZZUP_API_URL", "http://test"):
             m = WazzupMessenger()
-            # S01 "first" line — backward compat
-            text_first = m.build_message_text(MessageData(line="first", termin_date="25.02.2026"))
-            assert "SternMeister" in text_first
-            assert "записи на термин" in text_first
-            assert "25.02.2026" in text_first
 
-            # S01 "second" line — backward compat
-            text_second = m.build_message_text(MessageData(line="second", termin_date="26.02.2026"))
-            assert "термине" in text_second
-            assert "26.02.2026" in text_second
-
-            # S02 berater_accepted — uses name variable
+            # S02 berater_accepted — uses utility composite variables
             text_berater = m.build_message_text(
-                MessageData(line="berater_accepted", termin_date="", name="Анна")
+                MessageData(
+                    line="berater_accepted",
+                    termin_date="",
+                    name="Анна Петрова",
+                )
             )
-            assert "Анна" in text_berater
+            assert "Анна Петрова" in text_berater
 
     def test_health_endpoint(self, client):
         """DoD: Health check works and includes failed_temporal."""
@@ -562,7 +561,7 @@ class TestScenario8DoD:
         content = env_example.read_text()
         required_vars = [
             "KOMMO_DOMAIN", "KOMMO_TOKEN",
-            "WAZZUP_API_KEY", "WAZZUP_API_URL", "WAZZUP_CHANNEL_ID", "WAZZUP_TEMPLATE_ID",
+            "WAZZUP_API_KEY", "WAZZUP_API_URL", "WAZZUP_CHANNEL_ID",
             "KOMMO_WEBHOOK_SECRET",
             "TELEGRAM_BOT_TOKEN", "TELEGRAM_ALERT_CHAT_ID",
             "SEND_WINDOW_START", "SEND_WINDOW_END",
@@ -601,7 +600,7 @@ class TestScenarioCronPending:
             kommo_lead_id=70,
             kommo_contact_id=300,
             phone="+491761234567",
-            line="first",
+            line="gosniki_consultation_done",
             termin_date="26.02.2026",
             message_text="Здравствуйте...",
             status="pending",
@@ -780,4 +779,5 @@ class TestGosniki:
         msg = get_message_by_id(msg_id)
         assert msg["line"] == "gosniki_consultation_done"
         assert msg["status"] == "sent"
-        assert msg["template_values"] == json.dumps(["Карим Ахметов"])
+        tv = json.loads(msg["template_values"])
+        assert tv["name"] == "Карим Ахметов"

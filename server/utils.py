@@ -19,13 +19,13 @@ def mask_phone(phone: str) -> str:
 
 
 def is_in_send_window() -> bool:
-    """Check if current Berlin time is within the send window (9:00-21:00)."""
+    """Check if current Berlin time is within the send window (8:00-22:00)."""
     now_berlin = datetime.now(tz=_BERLIN_TZ)
     return SEND_WINDOW_START <= now_berlin.hour < SEND_WINDOW_END
 
 
 def get_next_send_window_start() -> str:
-    """Return next send window start (9:00 Berlin) as ISO 8601 UTC string.
+    """Return next send window start (8:00 Berlin) as ISO 8601 UTC string.
 
     Used for scheduling pending messages when outside the send window.
     All DB timestamps are stored in UTC.

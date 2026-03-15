@@ -1,7 +1,7 @@
 """Tests for server.utils — send window logic (T07).
 
 Boundary cases for is_in_send_window() and get_next_send_window_start().
-Default window: 9:00-21:00 Europe/Berlin.
+Default window: 8:00-22:00 Europe/Berlin.
 
 CET  (winter) = UTC+1  — e.g. February
 CEST (summer) = UTC+2  — e.g. July
@@ -21,11 +21,11 @@ from server.utils import get_next_send_window_start, is_in_send_window
 class TestIsInSendWindowCET:
     """Winter (CET, UTC+1) — February 2026."""
 
-    @freeze_time("2026-02-24T07:59:00Z")  # 08:59 Berlin
+    @freeze_time("2026-02-24T06:59:00Z")  # 07:59 Berlin
     def test_before_window(self):
         assert not is_in_send_window()
 
-    @freeze_time("2026-02-24T08:00:00Z")  # 09:00 Berlin
+    @freeze_time("2026-02-24T07:00:00Z")  # 08:00 Berlin
     def test_window_start(self):
         assert is_in_send_window()
 
@@ -33,15 +33,15 @@ class TestIsInSendWindowCET:
     def test_inside_window(self):
         assert is_in_send_window()
 
-    @freeze_time("2026-02-24T19:59:00Z")  # 20:59 Berlin
+    @freeze_time("2026-02-24T20:59:00Z")  # 21:59 Berlin
     def test_last_minute(self):
         assert is_in_send_window()
 
-    @freeze_time("2026-02-24T20:00:00Z")  # 21:00 Berlin
+    @freeze_time("2026-02-24T21:00:00Z")  # 22:00 Berlin
     def test_window_end(self):
         assert not is_in_send_window()
 
-    @freeze_time("2026-02-24T20:01:00Z")  # 21:01 Berlin
+    @freeze_time("2026-02-24T21:01:00Z")  # 22:01 Berlin
     def test_after_window(self):
         assert not is_in_send_window()
 
@@ -57,19 +57,19 @@ class TestIsInSendWindowCET:
 class TestIsInSendWindowCEST:
     """Summer (CEST, UTC+2) — July 2026."""
 
-    @freeze_time("2026-07-15T06:59:00Z")  # 08:59 Berlin
+    @freeze_time("2026-07-15T05:59:00Z")  # 07:59 Berlin
     def test_before_window(self):
         assert not is_in_send_window()
 
-    @freeze_time("2026-07-15T07:00:00Z")  # 09:00 Berlin
+    @freeze_time("2026-07-15T06:00:00Z")  # 08:00 Berlin
     def test_window_start(self):
         assert is_in_send_window()
 
-    @freeze_time("2026-07-15T18:59:00Z")  # 20:59 Berlin
+    @freeze_time("2026-07-15T19:59:00Z")  # 21:59 Berlin
     def test_last_minute(self):
         assert is_in_send_window()
 
-    @freeze_time("2026-07-15T19:00:00Z")  # 21:00 Berlin
+    @freeze_time("2026-07-15T20:00:00Z")  # 22:00 Berlin
     def test_window_end(self):
         assert not is_in_send_window()
 
@@ -79,52 +79,52 @@ class TestIsInSendWindowCEST:
 # ---------------------------------------------------------------------------
 
 class TestGetNextSendWindowCET:
-    """Winter (CET, UTC+1): 9:00 Berlin = 08:00 UTC."""
+    """Winter (CET, UTC+1): 8:00 Berlin = 07:00 UTC."""
 
     @freeze_time("2026-02-24T23:00:00Z")  # 00:00 Berlin (next day) — early morning
     def test_midnight_returns_today(self):
-        # 00:00 Berlin Feb 25 → should return today (Feb 25) at 09:00
-        assert get_next_send_window_start() == "2026-02-25T08:00:00+00:00"
+        # 00:00 Berlin Feb 25 → should return today (Feb 25) at 08:00
+        assert get_next_send_window_start() == "2026-02-25T07:00:00+00:00"
 
     @freeze_time("2026-02-24T02:00:00Z")  # 03:00 Berlin — early morning
     def test_early_morning_returns_today(self):
-        assert get_next_send_window_start() == "2026-02-24T08:00:00+00:00"
+        assert get_next_send_window_start() == "2026-02-24T07:00:00+00:00"
 
-    @freeze_time("2026-02-24T07:59:00Z")  # 08:59 Berlin — before window
+    @freeze_time("2026-02-24T06:59:00Z")  # 07:59 Berlin — before window
     def test_before_window_returns_today(self):
-        assert get_next_send_window_start() == "2026-02-24T08:00:00+00:00"
+        assert get_next_send_window_start() == "2026-02-24T07:00:00+00:00"
 
-    @freeze_time("2026-02-24T08:00:00Z")  # 09:00 Berlin — at window start
+    @freeze_time("2026-02-24T07:00:00Z")  # 08:00 Berlin — at window start
     def test_at_window_start_returns_tomorrow(self):
-        assert get_next_send_window_start() == "2026-02-25T08:00:00+00:00"
+        assert get_next_send_window_start() == "2026-02-25T07:00:00+00:00"
 
     @freeze_time("2026-02-24T14:30:00Z")  # 15:30 Berlin — inside window
     def test_inside_window_returns_tomorrow(self):
-        assert get_next_send_window_start() == "2026-02-25T08:00:00+00:00"
+        assert get_next_send_window_start() == "2026-02-25T07:00:00+00:00"
 
-    @freeze_time("2026-02-24T20:00:00Z")  # 21:00 Berlin — window closed
+    @freeze_time("2026-02-24T21:00:00Z")  # 22:00 Berlin — window closed
     def test_at_window_end_returns_tomorrow(self):
-        assert get_next_send_window_start() == "2026-02-25T08:00:00+00:00"
+        assert get_next_send_window_start() == "2026-02-25T07:00:00+00:00"
 
     @freeze_time("2026-02-24T22:30:00Z")  # 23:30 Berlin
     def test_late_night_returns_tomorrow(self):
-        assert get_next_send_window_start() == "2026-02-25T08:00:00+00:00"
+        assert get_next_send_window_start() == "2026-02-25T07:00:00+00:00"
 
 
 class TestGetNextSendWindowCEST:
-    """Summer (CEST, UTC+2): 9:00 Berlin = 07:00 UTC."""
+    """Summer (CEST, UTC+2): 8:00 Berlin = 06:00 UTC."""
 
-    @freeze_time("2026-07-15T06:59:00Z")  # 08:59 Berlin
+    @freeze_time("2026-07-15T05:59:00Z")  # 07:59 Berlin
     def test_before_window_returns_today(self):
-        assert get_next_send_window_start() == "2026-07-15T07:00:00+00:00"
+        assert get_next_send_window_start() == "2026-07-15T06:00:00+00:00"
 
-    @freeze_time("2026-07-15T07:00:00Z")  # 09:00 Berlin
+    @freeze_time("2026-07-15T06:00:00Z")  # 08:00 Berlin
     def test_at_window_start_returns_tomorrow(self):
-        assert get_next_send_window_start() == "2026-07-16T07:00:00+00:00"
+        assert get_next_send_window_start() == "2026-07-16T06:00:00+00:00"
 
-    @freeze_time("2026-07-15T19:00:00Z")  # 21:00 Berlin
+    @freeze_time("2026-07-15T20:00:00Z")  # 22:00 Berlin
     def test_at_window_end_returns_tomorrow(self):
-        assert get_next_send_window_start() == "2026-07-16T07:00:00+00:00"
+        assert get_next_send_window_start() == "2026-07-16T06:00:00+00:00"
 
 
 class TestGetNextSendWindowDST:
@@ -132,10 +132,10 @@ class TestGetNextSendWindowDST:
 
     @freeze_time("2026-03-28T22:30:00Z")  # 23:30 Berlin CET (night before spring-forward)
     def test_spring_forward_night(self):
-        # Next 9:00 is March 29 — already in CEST (UTC+2) → 07:00 UTC
-        assert get_next_send_window_start() == "2026-03-29T07:00:00+00:00"
+        # Next 8:00 is March 29 — already in CEST (UTC+2) → 06:00 UTC
+        assert get_next_send_window_start() == "2026-03-29T06:00:00+00:00"
 
     @freeze_time("2026-10-24T21:30:00Z")  # 23:30 Berlin CEST (night before fall-back)
     def test_fall_back_night(self):
-        # Next 9:00 is Oct 25 — already in CET (UTC+1) → 08:00 UTC
-        assert get_next_send_window_start() == "2026-10-25T08:00:00+00:00"
+        # Next 8:00 is Oct 25 — already in CET (UTC+1) → 07:00 UTC
+        assert get_next_send_window_start() == "2026-10-25T07:00:00+00:00"

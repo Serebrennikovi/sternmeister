@@ -13,6 +13,7 @@ from freezegun import freeze_time
 from zoneinfo import ZoneInfo
 
 from server.db import init_db, get_messages
+from server.template_helpers import CUSTOMER_FACING_BERATER
 
 
 # ---------------------------------------------------------------------------
@@ -175,8 +176,8 @@ class TestTemporalIntegration:
         messenger.send_message.assert_not_called()
         assert len(get_messages(kommo_lead_id=105)) == 0
 
-    def test_b2_days_7_no_send_no_db_record(self, kommo, messenger):
-        """Б2 placeholder: lead with ДЦ 7 days away → INFO log, no send, no DB record."""
+    def test_b2_days_7_sends_and_saves(self, kommo, messenger):
+        """Lead with ДЦ 7 days away → berater_day_minus_7 sent and stored."""
         lead = _make_lead(106, 93860331, dc_date=date(2026, 3, 11), aa_date=None)
         kommo.get_active_leads.return_value = [lead]
         kommo.extract_termin_date_dc.return_value = date(2026, 3, 11)
@@ -184,8 +185,35 @@ class TestTemporalIntegration:
 
         _run_cron(kommo, messenger)
 
+        messenger.send_message.assert_called_once()
+        msgs = get_messages(kommo_lead_id=106)
+        assert len(msgs) == 1
+        assert msgs[0]["line"] == "berater_day_minus_7"
+        assert msgs[0]["status"] == "sent"
+
+    def test_aa_day_minus_7_requires_allowed_stage(self, kommo, messenger):
+        lead = _make_lead(1061, 93860331, dc_date=None, aa_date=date(2026, 3, 11))
+        kommo.get_active_leads.return_value = [lead]
+        kommo.extract_termin_date_dc.return_value = None
+        kommo.extract_termin_date_aa.return_value = date(2026, 3, 11)
+
+        _run_cron(kommo, messenger)
+
         messenger.send_message.assert_not_called()
-        assert len(get_messages(kommo_lead_id=106)) == 0
+        assert len(get_messages(kommo_lead_id=1061)) == 0
+
+    def test_aa_day_minus_7_sends_on_allowed_stage(self, kommo, messenger):
+        lead = _make_lead(1062, 102183947, dc_date=None, aa_date=date(2026, 3, 11))
+        kommo.get_active_leads.return_value = [lead]
+        kommo.extract_termin_date_dc.return_value = None
+        kommo.extract_termin_date_aa.return_value = date(2026, 3, 11)
+
+        _run_cron(kommo, messenger)
+
+        messenger.send_message.assert_called_once()
+        msgs = get_messages(kommo_lead_id=1062)
+        assert len(msgs) == 1
+        assert msgs[0]["line"] == "berater_day_minus_7"
 
     def test_pagination_two_pages_all_leads_processed(self, kommo, messenger):
         """get_active_leads returns leads from two pages (via mock) → all processed."""
@@ -303,14 +331,15 @@ class TestTemporalIntegration:
         # M2 fix: template_values stored as dict, not positional list
         assert isinstance(tv, dict)
         assert tv["name"] == "Анна"
-        assert tv["institution"] == "Jobcenter"  # DC field → Jobcenter
+        assert tv["institution"] == CUSTOMER_FACING_BERATER
 
         # Verify _build_message_data can restore it
         from server.cron import _build_message_data
         md = _build_message_data(msgs[0])
         assert md.name == "Анна"
-        assert md.institution == "Jobcenter"
+        assert md.institution == CUSTOMER_FACING_BERATER
         assert md.weekday is not None
+        assert md.schedule_text is not None
 
     def test_fail_then_retry_success_temporal_not_retried_again(self, kommo, messenger):
         """H1-NEW fix: fail → retry-success path sets next_retry_at=None.

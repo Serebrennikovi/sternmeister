@@ -10,10 +10,10 @@ import logging
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 from server.alerts import get_alerter
 from server.config import (
+    FIELD_IDS,
     MAX_RETRY_ATTEMPTS, PHONE_WHITELIST,
     RETRY_INTERVAL_HOURS, STOP_STATUSES, TEMPLATE_MAP, determine_line,
 )
@@ -28,6 +28,20 @@ from server.db import (
 )
 from server.kommo import KommoAPIError, get_kommo_client
 from server.messenger import MessageData, MessengerError, get_messenger
+from server.template_helpers import (
+    BERLIN_TZ,
+    B2_CHECKLIST_TEXT,
+    CUSTOMER_FACING_BERATER,
+    TEMPORAL_DAYS_TO_LINE,
+    build_berater_accepted_texts,
+    build_berater_day_minus_3_schedule_text,
+    build_berater_day_minus_1_texts,
+    build_gosniki_consultation_done_texts,
+    coerce_date,
+    has_newer_berater_temporal_state,
+    iter_temporal_candidates,
+    pick_berater_accepted_institution_and_date,
+)
 from server.utils import (
     format_date_ru,
     get_next_send_window_start,
@@ -60,21 +74,162 @@ def _add_kommo_note(lead_id: int, line: str, note_type: str) -> None:
 
 def _build_message_data(msg) -> MessageData:
     """Restore MessageData from a DB row, including S02 template_values if present."""
+    line = msg["line"]
+    termin_date = msg["termin_date"]
     extra = {}
     try:
         tv = msg["template_values"]
     except IndexError:
+        # sqlite3.Row raises IndexError (not KeyError) for missing columns.
         tv = None
     if tv:
         loaded = json.loads(tv)
         if isinstance(loaded, dict):
-            # New format: keyed dict — robust, order-independent (temporal triggers)
-            extra = loaded
+            name = loaded.get("name")
+            if line == "gosniki_consultation_done":
+                extra = {"name": name}
+                if loaded.get("news_text"):
+                    extra["news_text"] = loaded["news_text"]
+                else:
+                    extra.update(build_gosniki_consultation_done_texts(name))
+            elif line == "berater_accepted":
+                extra = build_berater_accepted_texts(name)
+            elif line == "berater_day_minus_7":
+                extra = {
+                    "name": name,
+                    "institution": CUSTOMER_FACING_BERATER,
+                    "date": loaded.get("date") or termin_date,
+                    "checklist_text": loaded.get("checklist_text") or B2_CHECKLIST_TEXT,
+                }
+            elif line == "berater_day_minus_3":
+                date_for_template = loaded.get("date") or termin_date
+                schedule_text = loaded.get("schedule_text") or build_berater_day_minus_3_schedule_text(
+                    weekday=loaded.get("weekday"),
+                    date_text=date_for_template,
+                )
+                extra = {
+                    "name": name,
+                    "institution": CUSTOMER_FACING_BERATER,
+                    "weekday": loaded.get("weekday"),
+                    "date": date_for_template,
+                    "schedule_text": schedule_text,
+                }
+            elif line == "berater_day_minus_1":
+                date_for_template = loaded.get("date") or termin_date
+                b4_texts = build_berater_day_minus_1_texts(
+                    date_for_template=date_for_template,
+                    time_raw=loaded.get("time"),
+                )
+                extra = {
+                    "name": (name or "").strip() or "Клиент",
+                    "date": date_for_template,
+                    "time": b4_texts["time_text"],
+                    "datetime_text": loaded.get("datetime_text") or b4_texts["datetime_text"],
+                }
+            else:
+                # S01 / B5 keyed payloads can be restored as-is.
+                extra = loaded
         else:
             # Legacy list format (S01 / early S02 webhook records)
-            keys = ("name", "institution", "weekday", "date")
-            extra = dict(zip(keys, loaded))
-    return MessageData(line=msg["line"], termin_date=msg["termin_date"], **extra)
+            if line == "gosniki_consultation_done":
+                if loaded and loaded[0] == "SternMeister":
+                    extra = {
+                        "news_text": loaded[-1] if len(loaded) > 1 else build_gosniki_consultation_done_texts(None)["news_text"],
+                    }
+                else:
+                    legacy_name = loaded[0] if loaded else None
+                    extra = {
+                        "name": legacy_name,
+                        **build_gosniki_consultation_done_texts(legacy_name),
+                    }
+            elif line == "berater_accepted":
+                legacy_name = loaded[0] if loaded else None
+                extra = build_berater_accepted_texts(legacy_name)
+            elif line == "berater_day_minus_7":
+                legacy_name = loaded[0] if loaded else None
+                date_for_template = loaded[1] if len(loaded) > 1 else termin_date
+                institution = CUSTOMER_FACING_BERATER
+                checklist_text = B2_CHECKLIST_TEXT
+                if len(loaded) > 3:
+                    fourth = str(loaded[3])
+                    if "Angebot" in fourth or fourth.startswith("1."):
+                        institution = loaded[2] if len(loaded) > 2 else CUSTOMER_FACING_BERATER
+                        checklist_text = fourth
+                    else:
+                        institution = fourth or CUSTOMER_FACING_BERATER
+                extra = {
+                    "name": legacy_name,
+                    "institution": institution,
+                    "date": date_for_template,
+                    "checklist_text": checklist_text,
+                }
+            elif line == "berater_day_minus_3":
+                legacy_name = loaded[0] if loaded else None
+                date_for_template = loaded[3] if len(loaded) > 3 else termin_date
+                schedule_text = (
+                    loaded[2] if len(loaded) == 3 else build_berater_day_minus_3_schedule_text(
+                        weekday=loaded[2] if len(loaded) > 2 else None,
+                        date_text=date_for_template,
+                    )
+                )
+                extra = {
+                    "name": legacy_name,
+                    "institution": CUSTOMER_FACING_BERATER,
+                    "weekday": loaded[2] if len(loaded) > 2 else None,
+                    "date": date_for_template,
+                    "schedule_text": schedule_text,
+                }
+            elif line == "berater_day_minus_1":
+                legacy_name = loaded[0] if loaded and loaded[0] != "SternMeister" else None
+                date_for_template = termin_date
+                datetime_text = termin_date
+                if len(loaded) > 2 and loaded[0] == "SternMeister":
+                    datetime_text = loaded[2]
+                elif len(loaded) > 1:
+                    datetime_text = loaded[1]
+                b4_texts = build_berater_day_minus_1_texts(
+                    date_for_template=date_for_template or datetime_text,
+                    time_raw=None,
+                )
+                extra = {
+                    "name": (legacy_name or "").strip() or "Клиент",
+                    "date": date_for_template or termin_date,
+                    "time": b4_texts["time_text"],
+                    "datetime_text": datetime_text or b4_texts["datetime_text"],
+                }
+            else:
+                keys = ("name", "institution", "weekday", "date")
+                extra = dict(zip(keys, loaded))
+    return MessageData(line=line, termin_date=termin_date, **extra)
+
+
+def _lead_matches_newer_berater_temporal_state(kommo, lead: dict) -> bool:
+    """Return True when a Б1 message is stale for the current lead state."""
+    date_dc = coerce_date(kommo.extract_termin_date_dc(lead))
+    date_aa = coerce_date(kommo.extract_termin_date_aa(lead))
+    return has_newer_berater_temporal_state(
+        date_dc,
+        date_aa,
+        lead.get("status_id"),
+    )
+
+
+def _postpone_due_to_stale_check_error(msg_id: int) -> None:
+    """Delay the next stale-check attempt after a Kommo lookup error."""
+    next_retry = (
+        datetime.now(tz=timezone.utc) + timedelta(hours=RETRY_INTERVAL_HOURS)
+    ).isoformat(timespec="seconds")
+    update_message(msg_id, next_retry_at=next_retry)
+
+
+def _mark_stale_berater_accepted_message(msg_id: int, message_text: str) -> None:
+    """Terminally retire a stale Б1 record so retry/pending no longer pick it up."""
+    update_message(
+        msg_id,
+        status="failed",
+        next_retry_at=None,
+        message_text=f"[stale berater_accepted] {message_text}",
+    )
 
 
 def process_retries() -> tuple[int, int]:
@@ -98,6 +253,7 @@ def process_retries() -> tuple[int, int]:
         return 0, 0
 
     messenger = get_messenger()
+    kommo = get_kommo_client()
     max_attempts = MAX_RETRY_ATTEMPTS + 1
     success = 0
     failed = 0
@@ -111,6 +267,25 @@ def process_retries() -> tuple[int, int]:
         logger.info(
             "Retrying msg %d (attempt %d/%d)", msg_id, new_attempts, max_attempts,
         )
+
+        if msg["line"] == "berater_accepted":
+            try:
+                lead = kommo.get_lead_with_contacts(msg["kommo_lead_id"])
+            except (KeyError, TypeError, ValueError, KommoAPIError) as exc:
+                logger.warning(
+                    "Retry stale-check failed for msg %d (lead=%s): %s",
+                    msg_id, msg["kommo_lead_id"], exc,
+                )
+                get_alerter().alert_kommo_error(msg["kommo_lead_id"], str(exc))
+                _postpone_due_to_stale_check_error(msg_id)
+                continue
+            if _lead_matches_newer_berater_temporal_state(kommo, lead):
+                _mark_stale_berater_accepted_message(msg_id, msg["message_text"])
+                logger.info(
+                    "Retry skipped stale berater_accepted msg %d (lead=%s)",
+                    msg_id, msg["kommo_lead_id"],
+                )
+                continue
 
         try:
             message_data = _build_message_data(msg)
@@ -128,9 +303,12 @@ def process_retries() -> tuple[int, int]:
             failed += 1
             continue
 
-        # Placeholder template (e.g. berater_day_minus_7): no message sent, no DB update.
+        # Disabled template: no message sent, no DB update.
         if result.get("status") == "skipped":
-            logger.info("Retry skipped msg %d (line=%s, placeholder template)", msg_id, msg["line"])
+            logger.info(
+                "Retry skipped msg %d (line=%s, disabled template)",
+                msg_id, msg["line"],
+            )
             continue
 
         now = datetime.now(tz=timezone.utc)
@@ -180,11 +358,12 @@ def process_pending() -> tuple[int, int]:
     if not messages:
         return 0, 0
 
-    if not is_in_send_window():
-        logger.info("Outside send window, skipping pending")
-        return 0, 0
+    # Pending messages are already scheduled to the next send window start
+    # (via next_retry_at in webhook/backfill flows). Re-checking "current
+    # wall-clock window" here can postpone or skip eligible sends.
 
     messenger = get_messenger()
+    kommo = get_kommo_client()
     max_attempts = MAX_RETRY_ATTEMPTS + 1
     success = 0
     failed = 0
@@ -195,6 +374,25 @@ def process_pending() -> tuple[int, int]:
             logger.info("Pending skip msg %d: phone not in whitelist", msg_id)
             continue
         logger.info("Sending pending msg %d", msg_id)
+
+        if msg["line"] == "berater_accepted":
+            try:
+                lead = kommo.get_lead_with_contacts(msg["kommo_lead_id"])
+            except (KeyError, TypeError, ValueError, KommoAPIError) as exc:
+                logger.warning(
+                    "Pending stale-check failed for msg %d (lead=%s): %s",
+                    msg_id, msg["kommo_lead_id"], exc,
+                )
+                get_alerter().alert_kommo_error(msg["kommo_lead_id"], str(exc))
+                _postpone_due_to_stale_check_error(msg_id)
+                continue
+            if _lead_matches_newer_berater_temporal_state(kommo, lead):
+                _mark_stale_berater_accepted_message(msg_id, msg["message_text"])
+                logger.info(
+                    "Pending skipped stale berater_accepted msg %d (lead=%s)",
+                    msg_id, msg["kommo_lead_id"],
+                )
+                continue
 
         try:
             message_data = _build_message_data(msg)
@@ -220,9 +418,12 @@ def process_pending() -> tuple[int, int]:
             failed += 1
             continue
 
-        # Placeholder template (e.g. berater_day_minus_7): no message sent, no DB update.
+        # Disabled template: no message sent, no DB update.
         if result.get("status") == "skipped":
-            logger.info("Pending skipped msg %d (line=%s, placeholder template)", msg_id, msg["line"])
+            logger.info(
+                "Pending skipped msg %d (line=%s, disabled template)",
+                msg_id, msg["line"],
+            )
             continue
 
         now = datetime.now(tz=timezone.utc)
@@ -320,10 +521,68 @@ def process_webhook_backfill() -> tuple[int, int]:
                 logger.info("Backfill skip lead %d: phone not in whitelist", lead_id)
                 continue
 
-            # termin_date="": Г1/Б1 templates use only {{1}}=name, no date variable.
-            message_data = MessageData(line=line, termin_date="", name=name)
-            template_values_json = json.dumps([name])
+            termin_date = ""
+            if line == "berater_accepted":
+                date_dc = coerce_date(kommo.extract_termin_date_dc(lead))
+                date_aa = coerce_date(kommo.extract_termin_date_aa(lead))
+                _, date_for_template = pick_berater_accepted_institution_and_date(
+                    date_dc,
+                    date_aa,
+                )
+                b1_texts = build_berater_accepted_texts(
+                    name,
+                )
+                termin_date = date_for_template or ""
+                message_data = MessageData(
+                    line=line,
+                    termin_date=termin_date,
+                    name=b1_texts["name"],
+                )
+                template_values_json = json.dumps({
+                    "name": b1_texts["name"],
+                })
+            else:
+                g1_texts = build_gosniki_consultation_done_texts(name)
+                message_data = MessageData(
+                    line=line,
+                    termin_date="",
+                    name=name,
+                    news_text=g1_texts["news_text"],
+                )
+                template_values_json = json.dumps({
+                    "name": name,
+                    "news_text": g1_texts["news_text"],
+                })
+
             message_text = messenger.build_message_text(message_data)
+
+            if (
+                line == "berater_accepted"
+                and _lead_matches_newer_berater_temporal_state(kommo, lead)
+            ):
+                try:
+                    create_message(
+                        kommo_lead_id=lead_id,
+                        kommo_contact_id=contact_id,
+                        phone=phone,
+                        line=line,
+                        termin_date=termin_date,
+                        message_text=f"[stale berater_accepted] {message_text}",
+                        status="failed",
+                        attempts=0,
+                        next_retry_at=None,
+                        template_values=template_values_json,
+                    )
+                except sqlite3.IntegrityError:
+                    logger.warning(
+                        "Backfill dedup race (stale skip): lead=%d line=%s",
+                        lead_id, line,
+                    )
+                logger.info(
+                    "Backfill skipped stale berater_accepted for lead=%d",
+                    lead_id,
+                )
+                continue
 
             if not is_in_send_window():
                 next_retry_at = get_next_send_window_start()
@@ -333,7 +592,7 @@ def process_webhook_backfill() -> tuple[int, int]:
                         kommo_contact_id=contact_id,
                         phone=phone,
                         line=line,
-                        termin_date="",
+                        termin_date=termin_date,
                         message_text=message_text,
                         status="pending",
                         attempts=0,
@@ -361,7 +620,7 @@ def process_webhook_backfill() -> tuple[int, int]:
                     kommo_contact_id=contact_id,
                     phone=phone,
                     line=line,
-                    termin_date="",
+                    termin_date=termin_date,
                     message_text=message_text,
                     status="pending",
                     attempts=0,
@@ -396,7 +655,7 @@ def process_webhook_backfill() -> tuple[int, int]:
             # Added for consistency with process_retries() and process_pending().
             if result.get("status") == "skipped":
                 logger.info(
-                    "Backfill skipped lead=%d line=%s (placeholder template)",
+                    "Backfill skipped lead=%d line=%s (disabled template)",
                     lead_id, line,
                 )
                 continue
@@ -423,16 +682,8 @@ def process_webhook_backfill() -> tuple[int, int]:
 
     return created, failed
 
-
-_BERLIN_TZ = ZoneInfo("Europe/Berlin")
-
 # Maps days_until → temporal line name.
-_DAYS_TO_LINE: dict[int, str] = {
-    7: "berater_day_minus_7",
-    3: "berater_day_minus_3",
-    1: "berater_day_minus_1",
-    0: "berater_day_0",
-}
+_DAYS_TO_LINE: dict[int, str] = dict(TEMPORAL_DAYS_TO_LINE)
 
 # Lines that must fire exactly once — no re-send after a fail→retry-success cycle.
 _TEMPORAL_LINES: frozenset[str] = frozenset(_DAYS_TO_LINE.values())
@@ -448,7 +699,6 @@ def process_temporal_triggers() -> None:
     active lead and sends reminders at -7, -3, -1 and 0 days.
 
     - СТОП-статусы block both ДЦ and АА for the lead.
-    - berater_day_minus_7 is a placeholder (no WABA GUID): logged, skipped.
     - Dedup: one message per (lead_id, line, termin_date).
     - On MessengerError: status='failed' in DB; process_retries() will retry.
     """
@@ -465,14 +715,9 @@ def process_temporal_triggers() -> None:
         return
 
     logger.info("Temporal triggers: processing %d leads", len(leads))
-    today = datetime.now(tz=_BERLIN_TZ).date()
+    today = datetime.now(tz=BERLIN_TZ).date()
     messenger = get_messenger()
     stop_statuses = STOP_STATUSES.get(_BERATER_PIPELINE_ID, set())
-    # Pairs of (extractor callable, institution name) — processed independently per lead.
-    termin_fields = [
-        (kommo.extract_termin_date_dc, "Jobcenter"),
-        (kommo.extract_termin_date_aa, "Agentur für Arbeit"),
-    ]
 
     for lead in leads:
         lead_id = lead.get("id")
@@ -482,25 +727,15 @@ def process_temporal_triggers() -> None:
             logger.debug("Lead %d on STOP status %d, skipping", lead_id, lead.get("status_id"))
             continue
 
-        for extract_date, institution in termin_fields:
-            termin_date_obj = extract_date(lead)
-
-            if termin_date_obj is None:
-                continue
-
-            days_until = (termin_date_obj - today).days
-            line = _DAYS_TO_LINE.get(days_until)
-            if line is None:
-                continue
-
-            # berater_day_minus_7: placeholder GUID, log and skip (no DB record)
-            if TEMPLATE_MAP[line]["template_guid"] is None:
-                termin_date_str = format_date_ru(termin_date_obj)
-                logger.info(
-                    "Temporal berater_day_minus_7: placeholder GUID, skipping "
-                    "(lead_id=%d, termin_date=%s)", lead_id, termin_date_str,
-                )
-                continue
+        date_dc = coerce_date(kommo.extract_termin_date_dc(lead))
+        date_aa = coerce_date(kommo.extract_termin_date_aa(lead))
+        for line, termin_date_obj in iter_temporal_candidates(
+            date_dc,
+            date_aa,
+            lead.get("status_id"),
+            today=today,
+        ):
+            institution = CUSTOMER_FACING_BERATER
 
             termin_date_str = format_date_ru(termin_date_obj)
 
@@ -518,7 +753,7 @@ def process_temporal_triggers() -> None:
                 if not contacts:
                     raise KommoAPIError(f"Lead {lead_id} has no embedded contacts")
                 main_contact = next((c for c in contacts if c.get("is_main")), contacts[0])
-                contact_id = main_contact["id"]
+                contact_id = int(main_contact["id"])
                 contact = kommo.get_contact(contact_id)
                 name = kommo.extract_name(contact)
                 if name is None:
@@ -530,7 +765,7 @@ def process_temporal_triggers() -> None:
                     raise KommoAPIError(
                         f"Phone not found for contact {contact_id} (lead {lead_id})"
                     )
-            except KommoAPIError as exc:
+            except (KeyError, TypeError, ValueError, KommoAPIError) as exc:
                 logger.error("Failed to get contact for lead %d: %s", lead_id, exc)
                 get_alerter().alert_kommo_error(lead_id, str(exc))
                 continue
@@ -540,27 +775,82 @@ def process_temporal_triggers() -> None:
                 logger.info("Phone not in whitelist, skipping lead %d", lead_id)
                 continue
 
-            # Собрать MessageData
-            message_data = MessageData(
-                line=line,
-                termin_date=termin_date_str,
-                name=name,
-                institution=institution,
-                weekday=weekday_name(termin_date_obj),
-                date=termin_date_str,
-            )
+            if line == "berater_day_minus_7":
+                message_data = MessageData(
+                    line=line,
+                    termin_date=termin_date_str,
+                    name=name,
+                    institution=institution,
+                    date=termin_date_str,
+                    checklist_text=B2_CHECKLIST_TEXT,
+                )
+                template_values_json = json.dumps({
+                    "name": name,
+                    "institution": institution,
+                    "date": termin_date_str,
+                    "checklist_text": B2_CHECKLIST_TEXT,
+                })
+            elif line == "berater_day_minus_3":
+                weekday = weekday_name(termin_date_obj)
+                schedule_text = build_berater_day_minus_3_schedule_text(
+                    date_obj=termin_date_obj,
+                )
+                message_data = MessageData(
+                    line=line,
+                    termin_date=termin_date_str,
+                    name=name,
+                    institution=institution,
+                    weekday=weekday,
+                    date=termin_date_str,
+                    schedule_text=schedule_text,
+                )
+                template_values_json = json.dumps({
+                    "name": name,
+                    "institution": institution,
+                    "weekday": weekday,
+                    "date": termin_date_str,
+                    "schedule_text": schedule_text,
+                })
+            elif line == "berater_day_minus_1":
+                time_raw = kommo.extract_time_termin(lead, FIELD_IDS["time_termin"])
+                b4_texts = build_berater_day_minus_1_texts(
+                    date_for_template=termin_date_str,
+                    time_raw=time_raw,
+                )
+                message_data = MessageData(
+                    line=line,
+                    termin_date=termin_date_str,
+                    name=name,
+                    date=termin_date_str,
+                    time=b4_texts["time_text"],
+                    datetime_text=b4_texts["datetime_text"],
+                )
+                template_values_json = json.dumps({
+                    "name": name,
+                    "date": termin_date_str,
+                    "time": b4_texts["time_text"],
+                    "datetime_text": b4_texts["datetime_text"],
+                })
+            else:
+                # berater_day_0: keep existing behavior (single {{1}}=name)
+                weekday = weekday_name(termin_date_obj)
+                message_data = MessageData(
+                    line=line,
+                    termin_date=termin_date_str,
+                    name=name,
+                    institution=institution,
+                    weekday=weekday,
+                    date=termin_date_str,
+                )
+                template_values_json = json.dumps({
+                    "name": name,
+                    "institution": institution,
+                    "weekday": weekday,
+                    "date": termin_date_str,
+                })
 
             # Вычислить template_values для отправки в Wazzup
             template_values_list = TEMPLATE_MAP[line]["vars"](**dataclasses.asdict(message_data))
-            # Store MessageData extra fields as a keyed dict for robust retry restore (M2 fix).
-            # template_values_list is passed to build_message_text below;
-            # send_message() recomputes vars internally for the Wazzup API payload.
-            template_values_json = json.dumps({
-                "name": name,
-                "institution": institution,
-                "weekday": weekday_name(termin_date_obj),
-                "date": termin_date_str,
-            })
             message_text = messenger.build_message_text(
                 message_data, template_values=template_values_list,
             )
@@ -577,7 +867,7 @@ def process_temporal_triggers() -> None:
                 try:
                     create_message(
                         kommo_lead_id=lead_id,
-                        kommo_contact_id=contact["id"],
+                        kommo_contact_id=contact_id,
                         phone=phone,
                         line=line,
                         termin_date=termin_date_str,
@@ -596,6 +886,13 @@ def process_temporal_triggers() -> None:
                     )
                 continue
 
+            if result.get("status") == "skipped":
+                logger.info(
+                    "Temporal skipped lead=%d line=%s (template disabled)",
+                    lead_id, line,
+                )
+                continue
+
             # Успех — сохранить в БД и добавить примечание в Kommo
             now = datetime.now(tz=timezone.utc)
             sent_at = now.isoformat(timespec="seconds")
@@ -604,7 +901,7 @@ def process_temporal_triggers() -> None:
             try:
                 msg_id = create_message(
                     kommo_lead_id=lead_id,
-                    kommo_contact_id=contact["id"],
+                    kommo_contact_id=contact_id,
                     phone=phone,
                     line=line,
                     termin_date=termin_date_str,

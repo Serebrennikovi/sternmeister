@@ -1,7 +1,7 @@
 # Архитектура: WhatsApp авто-нотификации
 
-**Версия:** 1.1
-**Дата:** 2026-03-04
+**Версия:** 1.4
+**Дата:** 2026-03-13
 **Статус:** active
 
 ---
@@ -13,7 +13,23 @@
 1. **Первая линия** — клиент должен записаться на термин → напоминание
 2. **Вторая линия** — клиент ожидает термин → уведомление о статусе
 
-Повторная отправка через 24ч если нет ответа, максимум 2 раза. Отправка только с 9:00 до 21:00.
+Повторная отправка через 24ч если нет ответа, максимум 2 раза. Отправка только с 8:00 до 22:00.
+
+### Актуализация T17 final sync (2026-03-13)
+
+- Send window сервиса переведён на `08:00-22:00 Europe/Berlin`.
+- В коде и Wazzup синхронизирована финальная S02 utility-серия:
+  - Г1 `gosniki_consultation_done` → `95ddec60-bb6b-44a8-b5fb-a98abd76f974` (2 переменные)
+  - Б1 `berater_accepted` → `47d2946c-f66a-4697-b702-eb5d138bb1f1` (1 переменная)
+  - Б2 `berater_day_minus_7` → `b028964c-9c27-4bc9-9b97-02a5e283df16` (4 переменные)
+  - Б3 `berater_day_minus_3` → `e1cb07aa-5236-4f8a-84dc-fef26b3cccf6` (3 переменные + quick reply `Нужна помощь`)
+  - Б4 `berater_day_minus_1` → `a9b04e05-6b6c-4a5f-9463-d8a0d96316f4` (2 переменные + quick reply `Да, буду` / `Нет, не смогу`)
+  - Б5 `berater_day_0` остаётся на `176a8b5b-8704-4d04-aee5-0fbd08641806` (1 переменная)
+- Для S02 customer-facing текстов используется единая формулировка `с Бератором`; legacy `Jobcenter` / `Agentur für Arbeit` / `AA` больше не должны попадать в `templateValues`, retry/backfill или логируемый `message_text`.
+- Г1 теперь двухпеременный (`SternMeister`, `news_text`), Б1 — одно-переменный onboarding, Б2 не упоминает время, Б3 использует единый `schedule_text`, Б4 больше не зависит от shared S01-шаблона.
+- Б1 не досылается через webhook/retry/pending/backfill, если по сделке уже активен более поздний temporal-state (`berater_day_minus_3/-1/0`); в БД остаётся терминальный marker без дальнейшего retry.
+- Б2 по АА уходит только при сочетании `days_until_aa == 7` и этапа `102183943` / `102183947`.
+- Ручная часть T17 по созданию/одобрению шаблонов завершена; вне репозитория остаётся только optional whitelist render-check.
 
 ---
 
@@ -54,7 +70,7 @@
 **Логика:**
 1. Парсим payload: контакт, новый этап
 2. Определяем тип сообщения (первая/вторая линия)
-3. Проверяем время (9:00–21:00) → если вне окна, откладываем в очередь
+3. Проверяем время (8:00–22:00) → если вне окна, откладываем в очередь
 4. Формируем сообщение (шаблон + персонализация)
 5. Отправляем через Wazzup24 WABA
 6. Пишем примечание в Kommo: "Сообщение отправлено"
@@ -64,7 +80,7 @@
 
 Запускается раз в час. Проверяет SQLite:
 - Сообщения без ответа старше 24ч → повторная отправка (макс 2 раза)
-- Отложенные сообщения (вне окна 9–21) → отправка при наступлении окна
+- Отложенные сообщения (вне окна 8–22) → отправка при наступлении окна
 
 ### 3. Messenger layer
 
@@ -75,13 +91,21 @@ class WazzupMessenger:
 
 @dataclass
 class MessageData:
-    line: str               # S01: "first"/"second"; S02: "gosniki_consultation_done", "berater_accepted", "berater_day_minus_*", "berater_day_0"
+    line: str               # "gosniki_consultation_done", "berater_accepted", "berater_day_minus_7", "berater_day_minus_3", "berater_day_minus_1", "berater_day_0"
     termin_date: str        # "25.02.2026" (DD.MM.YYYY); "" допустимо для Г1/Б1
     # S02 (optional):
     name: str | None = None
-    institution: str | None = None  # "Jobcenter" / "Agentur für Arbeit"
+    news_text: str | None = None      # Г1: customer-facing текст новости
+    institution: str | None = None    # customer-facing "с Бератором"
     weekday: str | None = None
     date: str | None = None
+    time: str | None = None
+    checklist_text: str | None = None # Б2: plain-text checklist block
+    schedule_text: str | None = None  # Б3: "Среда, 19.03.2026"
+    topic: str | None = None          # legacy B1 compatibility
+    subject_text: str | None = None   # legacy B4 compatibility
+    datetime_text: str | None = None  # Б4: дата или дата+время одним куском
+    location_text: str | None = None  # legacy B1 compatibility
 ```
 
 Единственная реализация — `WazzupMessenger`. Абстракция `BaseMessenger` не создаётся (YAGNI — один backend). При необходимости добавить другой канал — выделить интерфейс.
@@ -102,7 +126,7 @@ class MessageData:
 | kommo_lead_id | INTEGER | ID сделки (лида) в Kommo |
 | kommo_contact_id | INTEGER | ID контакта в Kommo |
 | phone | TEXT | Номер телефона |
-| line | TEXT | S01: "first" / "second"; S02: "gosniki_consultation_done" / "berater_accepted" / "berater_day_minus_7" / "berater_day_minus_3" / "berater_day_minus_1" / "berater_day_0" |
+| line | TEXT | "gosniki_consultation_done" / "berater_accepted" / "berater_day_minus_7" / "berater_day_minus_3" / "berater_day_minus_1" / "berater_day_0" (legacy S01 "first"/"second" удалены) |
 | termin_date | TEXT | Дата термина (DD.MM.YYYY) |
 | message_text | TEXT | Текст отправленного сообщения |
 | status | TEXT | "sent" / "delivered" / "failed" / "pending" |
@@ -185,54 +209,18 @@ class MessageData:
 - **Тип транспорта:** `wapi` (WhatsApp Business API)
 - **Статус:** `active`
 
-**Доступные WABA шаблоны (9 одобренных):**
+**Активные S02 WABA шаблоны (снимок API от 13.03.2026):**
 
-1. **"Напоминание о записи или встрече"** ⭐ используется
-   - templateGuid: `38194e93-e926-4826-babe-19032e0bd74c`
-   - Категория: UTILITY
-   - Текст: "Здравствуйте. Это {{1}}. Напоминаем о {{2}} в {{3}}. Скажите, все в силе?"
-   - Кнопки: "Да, буду вовремя" / "Нет, не могу прийти"
+| Линия | line | templateGuid | Категория | Статус | Переменные | Примечание |
+|------|------|--------------|-----------|--------|------------|------------|
+| Г1 | `gosniki_consultation_done` | `95ddec60-bb6b-44a8-b5fb-a98abd76f974` | UTILITY | approved | 2 | `Здравствуйте. Вас беспокоит {{1}}. Есть обновления по вашему запросу: {{2}}.` |
+| Б1 | `berater_accepted` | `47d2946c-f66a-4697-b702-eb5d138bb1f1` | UTILITY | approved | 1 | onboarding-поздравление после записи |
+| Б2 | `berater_day_minus_7` | `b028964c-9c27-4bc9-9b97-02a5e283df16` | UTILITY | approved | 4 | без времени; `{{4}}` = checklist block |
+| Б3 | `berater_day_minus_3` | `e1cb07aa-5236-4f8a-84dc-fef26b3cccf6` | UTILITY | approved | 3 | quick reply `Нужна помощь` |
+| Б4 | `berater_day_minus_1` | `a9b04e05-6b6c-4a5f-9463-d8a0d96316f4` | UTILITY | approved | 2 | quick reply `Да, буду` / `Нет, не смогу` |
+| Б5 | `berater_day_0` | `176a8b5b-8704-4d04-aee5-0fbd08641806` | UTILITY | approved | 1 | без изменений после T17 |
 
-2. **"Уведомление о записи"**
-   - templateGuid: `3b7211aa-6fbd-4b60-bb96-02d7cc837c73`
-   - Категория: UTILITY
-   - Текст: "Здравствуйте. Это {{1}}. Вы записаны на {{2}}. Дата и время: {{3}}. Будем ждать вас {{4}}."
-
-3. **"Напоминание об оплате"**
-   - templateGuid: `9c5e1776-b2fd-42ff-88aa-d128107daa01`
-   - Категория: UTILITY
-   - Текст: "Здравствуйте. Это {{1}}. Напоминаем, что до {{2}} нужно внести {{3}} в размере {{4}} за {{5}}."
-
-4. **"Информация о заказе"**
-   - templateGuid: `89155c52-758e-473a-9e44-dcdc086d206a`
-   - Категория: UTILITY
-   - Текст: "Здравствуйте. Это {{1}}. По вашему заказу {{2}} есть новости: {{3}}."
-
-5. **"Новости и предложения для клиента"**
-   - templateGuid: `16a476d9-a406-41c0-9fcf-706194ff053e`
-   - Категория: MARKETING
-   - Текст: "Здравствуйте. Это {{1}}. Ранее общались по поводу {{2}}. У нас есть новости: {{3}}."
-
-6. **"Термин_"**
-   - templateGuid: `e5952102-0e55-434e-a262-78a555385456`
-   - Категория: MARKETING
-   - Текст: "В продолжение диалога направляю Вам окончательную версию мотивационного письма {{1}} и памятку о порядке дальнейших действий для назначения и успешного прохождения термина с бератером."
-   - Кнопка: "Памятка"
-
-7. **"А1"**
-   - templateGuid: `0105fd1a-f7f9-47ac-908c-93595b263e30`
-   - Категория: MARKETING
-   - Текст: "Приветствуем,{{1}}! На связи SternMeister 🚀 Мы внимательно изучили вашу анкету и увидели, что ваш уровень немецкого не подходит под критерии программы и гос. финансирования. Будем рады вас видеть среди наших студентов, когда ваш уровень немецкого будет A2+. Хорошего вам дня!"
-
-8. **"Универсальный шаблон 4"**
-   - templateGuid: `4e049e0c-c404-45ba-b516-5ae932260b19`
-   - Категория: MARKETING
-   - Текст: "ㅤ {{1}}ㅤ ㅤ ㅤ ㅤ" (пустой шаблон)
-
-9. **"Универсальный шаблон 2"**
-   - templateGuid: `d7ed72e6-c1fe-4f5b-970a-deb2ffff0af0`
-   - Категория: MARKETING
-   - Текст: "ㅤ {{1}} ㅤ ㅤ ㅤㅤ" (пустой шаблон)
+Другие approved WABA-шаблоны в аккаунте есть, но они не используются текущими S01/S02 code paths и поэтому здесь не перечисляются.
 
 **API методы (v3):**
 ```bash
@@ -249,8 +237,8 @@ Content-Type: application/json
   "channelId": "uuid-канала",
   "chatId": "491234567890",
   "chatType": "whatsapp",
-  "templateId": "38194e93-e926-4826-babe-19032e0bd74c",
-  "templateValues": ["SternMeister", "термине", "25.02.2026"]
+  "templateId": "a9b04e05-6b6c-4a5f-9463-d8a0d96316f4",
+  "templateValues": ["Иван", "15.03.2026 в 09:30"]
 }
 # Ответ: 201 Created → {"messageId": "uuid", "chatId": "..."}
 ```
@@ -334,8 +322,8 @@ TELEGRAM_BOT_TOKEN=...
 TELEGRAM_ALERT_CHAT_ID=...
 
 # Settings
-SEND_WINDOW_START=9
-SEND_WINDOW_END=21
+SEND_WINDOW_START=8
+SEND_WINDOW_END=22
 MAX_RETRY_ATTEMPTS=2
 RETRY_INTERVAL_HOURS=24
 
@@ -348,9 +336,9 @@ DATABASE_PATH=./data/messages.db
 ## Ограничения и допущения
 
 - **WABA требует использования одобренных шаблонов** — для первого сообщения только через template. После ответа клиента есть 24 часа на произвольный текст
-- Используем шаблон **"Напоминание о записи или встрече"** (templateGuid: `38194e93-e926-4826-babe-19032e0bd74c`) для обеих линий
+- Для S02 используются отдельные approved line-specific шаблоны; новый Б4 больше не зависит от shared legacy-шаблона S01.
 - SQLite достаточно для ~300 клиентов и ~60 сообщений/день. При росте → PostgreSQL
-- Часовой пояс: клиенты в разных городах Германии, но вся страна в одном часовом поясе (CET/CEST). Упрощает логику окна 9–21
+- Часовой пояс: клиенты в разных городах Германии, но вся страна в одном часовом поясе (CET/CEST). Упрощает логику окна 8–22
 - "Нет ответа" определяем по отсутствию входящего сообщения от контакта, а не по статусу "прочитано"
 
 ---
@@ -359,8 +347,8 @@ DATABASE_PATH=./data/messages.db
 
 - [x] Webhook от Kommo принимается и обрабатывается
 - [x] Сообщение отправляется в WhatsApp при смене этапа воронки
-- [x] Персонализация: дата термина (имя клиента не используется — ограничение WABA-шаблона)
-- [x] Отправка только в окне 9:00–21:00, отложенные уходят утром
+- [x] Персонализация: имя клиента, дата термина, customer-facing контекст и line-specific шаблонные переменные
+- [x] Отправка только в окне 8:00–22:00, отложенные уходят утром
 - [x] Повторная отправка через 24ч, макс 2 раза
 - [x] Примечание в Kommo: "сообщение отправлено"
 - [x] Алерт в Telegram при ошибке
